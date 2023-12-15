@@ -1,29 +1,30 @@
 pub mod format;
-use crate::format::{format_bytes, format_duration};
 use format::BYTE;
 use std::fs::File;
 use std::io::Write;
 use std::ptr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use winapi::um::wingdi::{BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, GetDIBits, SRCCOPY};
 use winapi::um::winuser::{GetDC, ReleaseDC};
 
 const RESOLUTION_WIDTH: u32 = 2560;
 const RESOLUTION_HEIGHT: u32 = 1440;
+const FRAME_PER_SEC: u32 = 120;
 const COLOR_CHANNEL_COUNT: u8 = 3;
 const COLOR_BIT_DEPTH: u8 = 8;
-const FRAME_RATE: u32 = 120;
-const REPLAY_BUFFER_DURATION: Duration = Duration::from_secs(30);
-const MAX_RAM_USAGE: u64 = 8 * format::GIGABYTE;
+const REPLAY_BUFFER_DURATION: Duration = Duration::from_secs(1);
+const _MAX_RAM_USAGE: u64 = 8 * format::GIGABYTE;
 
 const FRAME_BUFFER_BYTES_COUNT: usize = RESOLUTION_WIDTH as usize
     * RESOLUTION_HEIGHT as usize
     * COLOR_CHANNEL_COUNT as usize
     * (COLOR_BIT_DEPTH / BYTE) as usize;
 const FRAME_BUFFER_BITS_COUNT: usize = FRAME_BUFFER_BYTES_COUNT * BYTE as usize;
-const OMEGA_FRAME_COUNT: usize = FRAME_RATE as usize * REPLAY_BUFFER_DURATION.as_secs() as usize;
+const OMEGA_FRAME_COUNT: usize = FRAME_PER_SEC as usize * REPLAY_BUFFER_DURATION.as_secs() as usize;
 
 pub fn record() -> Result<(), std::io::Error> {
+    let delay_between_frames = Duration::from_millis(1000 / FRAME_PER_SEC as u64);
+
     let mut file = File::create("C:\\Users\\DREAD\\Desktop\\_\\recordings\\output.raw")
         .expect("Unable to create file");
 
@@ -33,30 +34,43 @@ pub fn record() -> Result<(), std::io::Error> {
 
     println!(
         "Bits per frame: {}",
-        format_bytes(FRAME_BUFFER_BITS_COUNT as u64)
+        format::bytes(FRAME_BUFFER_BITS_COUNT as u64)
     );
 
-    println!("Frame rate: {}", FRAME_RATE);
+    println!("Frame rate: {}", FRAME_PER_SEC);
     println!(
         "Replay buffer duration: {}",
-        format_duration(REPLAY_BUFFER_DURATION)
+        format::duration(REPLAY_BUFFER_DURATION)
     );
     println!(
         "Frame bit size: {}",
-        format_bytes(FRAME_BUFFER_BYTES_COUNT as u64)
+        format::bytes(FRAME_BUFFER_BYTES_COUNT as u64)
     );
     println!(
         "Replay buffer size: {}",
-        format_bytes(FRAME_BUFFER_BYTES_COUNT as u64 * OMEGA_FRAME_COUNT as u64)
+        format::bytes(FRAME_BUFFER_BYTES_COUNT as u64 * OMEGA_FRAME_COUNT as u64)
     );
 
     let mut frame_data = vec![0; FRAME_BUFFER_BYTES_COUNT];
 
-    let temporary = 240;
+    let start_time = Instant::now();
+    let end_time = start_time + REPLAY_BUFFER_DURATION;
 
-    let start_time = std::time::Instant::now();
+    let mut next_frame = start_time;
 
-    for _i in 0..temporary {
+    while Instant::now() < end_time {
+        if Instant::now() < next_frame {
+            continue;
+        }
+
+        if Instant::now() > next_frame + delay_between_frames {
+            println!(
+                "Frame was supposed to be at {}, but it's now {}",
+                format::duration(next_frame - start_time),
+                format::duration(Instant::now() - start_time)
+            );
+        }
+
         unsafe {
             let desktop_dc = GetDC(ptr::null_mut());
             let compatible_dc = CreateCompatibleDC(desktop_dc);
@@ -111,20 +125,15 @@ pub fn record() -> Result<(), std::io::Error> {
         }
 
         file.write_all(&frame_data)?;
+        next_frame += delay_between_frames;
     }
 
-    // ASSERT ELAPSED TIME IS PROPER
-    let elapsed_time = start_time.elapsed();
-    let expected_time = temporary as u32 / FRAME_RATE;
-    let expected_time = Duration::from_secs(expected_time as u64);
-    assert_eq!(elapsed_time, expected_time);
+    file.flush()?;
+    file.sync_all()?;
 
-    // ASSERT FILE SIZE
     let file_size = file.metadata()?.len();
-    let expected_file_size = FRAME_BUFFER_BYTES_COUNT as u64 * temporary;
+    let expected_file_size = FRAME_BUFFER_BYTES_COUNT as u64 * OMEGA_FRAME_COUNT as u64;
     assert_eq!(file_size, expected_file_size);
-
-    // ffmpeg -f rawvideo -pixel_format bgr24 -video_size 2560x1440 -framerate 120 -i "!input_file!" -c:v libx264 -pix_fmt yuv444p -bf 0 -g 30 "!output_file!"
 
     Ok(())
 }
