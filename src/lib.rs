@@ -21,6 +21,7 @@ const FRAME_BUFFER_BYTES_COUNT: usize = RESOLUTION_WIDTH as usize
     * (COLOR_BIT_DEPTH / BYTE) as usize;
 const FRAME_BUFFER_BITS_COUNT: usize = FRAME_BUFFER_BYTES_COUNT * BYTE as usize;
 const OMEGA_FRAME_COUNT: usize = FRAME_PER_SEC as usize * REPLAY_BUFFER_DURATION.as_secs() as usize;
+const FRAME_COUNT_IN_BUFFER: usize = FRAME_PER_SEC as usize / 30;
 
 pub fn record() -> Result<(), std::io::Error> {
     let delay_between_frames = Duration::from_millis(1000 / FRAME_PER_SEC as u64);
@@ -51,13 +52,13 @@ pub fn record() -> Result<(), std::io::Error> {
         format::bytes(FRAME_BUFFER_BYTES_COUNT as u64 * OMEGA_FRAME_COUNT as u64)
     );
 
-    let mut frame_data = vec![0; FRAME_BUFFER_BYTES_COUNT];
+    let mut frame_data = vec![0; FRAME_BUFFER_BYTES_COUNT * FRAME_COUNT_IN_BUFFER];
 
     let start_time = Instant::now();
     let end_time = start_time + REPLAY_BUFFER_DURATION;
 
     let mut next_frame = start_time;
-
+    let mut current_buffer_frame_index = 0;
     while Instant::now() < end_time {
         if Instant::now() < next_frame {
             continue;
@@ -108,7 +109,10 @@ pub fn record() -> Result<(), std::io::Error> {
                 bitmap,
                 0,
                 RESOLUTION_HEIGHT as u32,
-                frame_data.as_mut_ptr() as *mut _,
+                frame_data
+                    .as_mut_ptr()
+                    .offset((current_buffer_frame_index * FRAME_BUFFER_BYTES_COUNT) as isize)
+                    as *mut _,
                 &mut bitmap_info,
                 winapi::um::wingdi::DIB_RGB_COLORS,
             );
@@ -124,11 +128,17 @@ pub fn record() -> Result<(), std::io::Error> {
             ReleaseDC(ptr::null_mut(), desktop_dc);
         }
 
-        file.write_all(&frame_data)?;
         next_frame += delay_between_frames;
+        current_buffer_frame_index += 1;
+
+        if current_buffer_frame_index >= FRAME_COUNT_IN_BUFFER {
+            println!("Writing to file...");
+            file.write_all(&frame_data)?;
+            file.flush()?;
+            current_buffer_frame_index = 0;
+        }
     }
 
-    file.flush()?;
     file.sync_all()?;
 
     let file_size = file.metadata()?.len();
