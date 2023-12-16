@@ -1,3 +1,3 @@
-fn main() -> Result<(), std::io::Error> {
+fn main() {
     soraka::record()
 }

@@ -1,149 +1,206 @@
 pub mod format;
 use format::BYTE;
-use std::fs::File;
-use std::io::Write;
-use std::ptr;
-use std::time::{Duration, Instant};
-use winapi::um::wingdi::{BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, GetDIBits, SRCCOPY};
-use winapi::um::winuser::{GetDC, ReleaseDC};
 
+use std::time::Duration;
+use tokio::fs::OpenOptions;
+use tokio::io::AsyncWriteExt;
+use win_desktop_duplication::*;
+use win_desktop_duplication::{devices::*, tex_reader::*};
+
+// Settings
 const RESOLUTION_WIDTH: u32 = 2560;
 const RESOLUTION_HEIGHT: u32 = 1440;
-const FRAME_PER_SEC: u32 = 120;
+const FRAMERATE_PER_SEC: u32 = 120;
 const COLOR_CHANNEL_COUNT: u8 = 3;
-const COLOR_BIT_DEPTH: u8 = 8;
-const REPLAY_BUFFER_DURATION: Duration = Duration::from_secs(1);
+const _COLOR_BIT_DEPTH: u8 = 8;
+const REPLAY_BUFFER_DURATION: Duration = Duration::from_secs(3);
 const _MAX_RAM_USAGE: u64 = 8 * format::GIGABYTE;
+const RAW_SAVE_PATH: &str = "C:\\Users\\DREAD\\Desktop\\_\\recordings\\output.raw";
+const FFMPEG_SAVE_PATH: &str = "C:\\Users\\DREAD\\Desktop\\_\\recordings\\output.mp4";
 
-const FRAME_BUFFER_BYTES_COUNT: usize = RESOLUTION_WIDTH as usize
-    * RESOLUTION_HEIGHT as usize
-    * COLOR_CHANNEL_COUNT as usize
-    * (COLOR_BIT_DEPTH / BYTE) as usize;
-const FRAME_BUFFER_BITS_COUNT: usize = FRAME_BUFFER_BYTES_COUNT * BYTE as usize;
-const OMEGA_FRAME_COUNT: usize = FRAME_PER_SEC as usize * REPLAY_BUFFER_DURATION.as_secs() as usize;
-const FRAME_COUNT_IN_BUFFER: usize = FRAME_PER_SEC as usize / 30;
+const MAX_FRAME_BUFFERS: usize = FRAMERATE_PER_SEC as usize / 30;
 
-pub fn record() -> Result<(), std::io::Error> {
-    let delay_between_frames = Duration::from_millis(1000 / FRAME_PER_SEC as u64);
+const ON_START_DELETE_RAW_FILE: bool = true;
+const ON_START_DELETE_FFMPEG_FILE: bool = true;
 
-    let mut file = File::create("C:\\Users\\DREAD\\Desktop\\_\\recordings\\output.raw")
-        .expect("Unable to create file");
+const DEBUG_MODE_SAVE_ONCE_OMEGA_BUFFER_FULL: bool = true;
 
-    println!("Resolution: {}x{}", RESOLUTION_WIDTH, RESOLUTION_HEIGHT);
-    println!("Channel count: {}", COLOR_CHANNEL_COUNT);
-    println!("Color bit depth: {}", COLOR_BIT_DEPTH);
+// Precomputation
+// enum ChannelKind {
+//     Red,
+//     Green,
+//     Blue,
+//     Alpha,
+// }
 
-    println!(
-        "Bits per frame: {}",
-        format::bytes(FRAME_BUFFER_BITS_COUNT as u64)
-    );
+// struct Channel {
+//     kind: ChannelKind,
+//     depth: u8,
+// }
 
-    println!("Frame rate: {}", FRAME_PER_SEC);
-    println!(
-        "Replay buffer duration: {}",
-        format::duration(REPLAY_BUFFER_DURATION)
-    );
-    println!(
-        "Frame bit size: {}",
-        format::bytes(FRAME_BUFFER_BYTES_COUNT as u64)
-    );
-    println!(
-        "Replay buffer size: {}",
-        format::bytes(FRAME_BUFFER_BYTES_COUNT as u64 * OMEGA_FRAME_COUNT as u64)
-    );
+// struct Resolution {
+//     width: u32,
+//     height: u32,
+// }
 
-    let mut frame_data = vec![0; FRAME_BUFFER_BYTES_COUNT * FRAME_COUNT_IN_BUFFER];
+// struct VideoFormat {
+//     resolution: Resolution,
+//     framerate_per_second: u32,
+//     channels: Vec<Channel>,
+// }
 
-    let start_time = Instant::now();
-    let end_time = start_time + REPLAY_BUFFER_DURATION;
+const OMEGA_FRAME_COUNT: usize =
+    FRAMERATE_PER_SEC as usize * REPLAY_BUFFER_DURATION.as_secs() as usize;
 
-    let mut next_frame = start_time;
-    let mut current_buffer_frame_index = 0;
-    while Instant::now() < end_time {
-        if Instant::now() < next_frame {
-            continue;
-        }
+const FRAME_BUFFER_RESOLUTION_WIDTH: u32 = RESOLUTION_WIDTH;
+const FRAME_BUFFER_RESOLUTION_HEIGHT: u32 = RESOLUTION_HEIGHT;
+const FRAME_BUFFER_COLOR_CHANNEL_COUNT: u8 = 4;
+const FRAME_BUFFER_COLOR_BIT_DEPTH: u8 = 8;
+const FRAME_BUFFER_BYTES_COUNT: usize = FRAME_BUFFER_RESOLUTION_WIDTH as usize
+    * FRAME_BUFFER_RESOLUTION_HEIGHT as usize
+    * FRAME_BUFFER_COLOR_CHANNEL_COUNT as usize
+    * (FRAME_BUFFER_COLOR_BIT_DEPTH / BYTE) as usize;
+const _FRAME_BUFFER_BITS_COUNT: usize = FRAME_BUFFER_BYTES_COUNT * BYTE as usize;
 
-        if Instant::now() > next_frame + delay_between_frames {
-            println!(
-                "Frame was supposed to be at {}, but it's now {}",
-                format::duration(next_frame - start_time),
-                format::duration(Instant::now() - start_time)
-            );
-        }
+const TRIMMED_ALPHA_FRAME_BITS_COUNT: usize = (FRAME_BUFFER_BYTES_COUNT / 4) * 3;
 
-        unsafe {
-            let desktop_dc = GetDC(ptr::null_mut());
-            let compatible_dc = CreateCompatibleDC(desktop_dc);
-            let bitmap = CreateCompatibleBitmap(
-                desktop_dc,
-                RESOLUTION_WIDTH as i32,
-                RESOLUTION_HEIGHT as i32,
-            );
-            let old_bitmap = winapi::um::wingdi::SelectObject(compatible_dc, bitmap as *mut _);
+#[derive(Clone)]
+struct Frame {
+    data: Vec<u8>,
+}
 
-            BitBlt(
-                compatible_dc,
-                0,
-                0,
-                RESOLUTION_WIDTH as i32,
-                RESOLUTION_HEIGHT as i32,
-                desktop_dc,
-                0,
-                0,
-                SRCCOPY,
-            );
+struct OmegaBuffer {
+    frames: Vec<Frame>,
+    current_index: usize,
+    total_frames_count: usize,
+}
 
-            let mut bitmap_info = std::mem::zeroed::<winapi::um::wingdi::BITMAPINFO>();
-            bitmap_info.bmiHeader.biSize =
-                std::mem::size_of::<winapi::um::wingdi::BITMAPINFOHEADER>() as u32;
-            bitmap_info.bmiHeader.biSizeImage = FRAME_BUFFER_BYTES_COUNT as u32;
-            bitmap_info.bmiHeader.biWidth = RESOLUTION_WIDTH as i32;
-            bitmap_info.bmiHeader.biHeight = -(RESOLUTION_HEIGHT as i32);
-            bitmap_info.bmiHeader.biPlanes = 1;
-            bitmap_info.bmiHeader.biBitCount = (COLOR_CHANNEL_COUNT * COLOR_BIT_DEPTH) as u16;
-            bitmap_info.bmiHeader.biCompression = winapi::um::wingdi::BI_RGB;
+#[tokio::main(flavor = "current_thread")]
+pub async fn record() {
+    set_process_dpi_awareness();
+    co_init();
 
-            let result = GetDIBits(
-                desktop_dc,
-                bitmap,
-                0,
-                RESOLUTION_HEIGHT as u32,
-                frame_data
-                    .as_mut_ptr()
-                    .offset((current_buffer_frame_index * FRAME_BUFFER_BYTES_COUNT) as isize)
-                    as *mut _,
-                &mut bitmap_info,
-                winapi::um::wingdi::DIB_RGB_COLORS,
-            );
+    let adapter = AdapterFactory::new().get_adapter_by_idx(0).unwrap();
+    let display = adapter.get_display_by_idx(0).unwrap();
+    println!("Display name: {}", display.name());
 
-            if result == 0 {
-                println!(
-                    "GetDIBits failed with error: {}",
-                    std::io::Error::last_os_error()
-                );
-            }
+    let mut dupl_api = DesktopDuplicationApi::new(adapter, display).unwrap();
 
-            winapi::um::wingdi::SelectObject(compatible_dc, old_bitmap);
-            ReleaseDC(ptr::null_mut(), desktop_dc);
-        }
+    let (device, ctx) = dupl_api.get_device_and_ctx();
+    let mut texture_reader = TextureReader::new(device, ctx);
 
-        next_frame += delay_between_frames;
-        current_buffer_frame_index += 1;
+    let mut omega_buffer = OmegaBuffer::new();
 
-        if current_buffer_frame_index >= FRAME_COUNT_IN_BUFFER {
-            println!("Writing to file...");
-            file.write_all(&frame_data)?;
-            file.flush()?;
-            current_buffer_frame_index = 0;
-        }
+    if ON_START_DELETE_RAW_FILE {
+        let _ = std::fs::remove_file(RAW_SAVE_PATH);
+        println!("Deleted raw file: {}", RAW_SAVE_PATH);
     }
 
-    file.sync_all()?;
+    loop {
+        let result = dupl_api.acquire_next_vsync_frame().await;
+        if let Ok(tex) = result {
+            let frame_buffer = &mut omega_buffer.frames[omega_buffer.current_index].data;
 
-    let file_size = file.metadata()?.len();
-    let expected_file_size = FRAME_BUFFER_BYTES_COUNT as u64 * OMEGA_FRAME_COUNT as u64;
-    assert_eq!(file_size, expected_file_size);
+            texture_reader
+                .get_data(frame_buffer, &tex)
+                .expect("Error getting data");
 
-    Ok(())
+            frame_buffer.resize(TRIMMED_ALPHA_FRAME_BITS_COUNT, 0);
+
+            // TODO : double omega for async / threadding
+            omega_buffer.current_index += 1;
+            if omega_buffer.current_index >= MAX_FRAME_BUFFERS {
+                omega_buffer.current_index = 0;
+
+                // TEMP : stop recording when buffer is full
+
+                println!("Captured {} frames", omega_buffer.total_frames_count);
+
+                let mut file = match OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(RAW_SAVE_PATH)
+                    .await
+                {
+                    Ok(file) => file,
+                    Err(e) => panic!("Error creating file: {}", e),
+                };
+
+                for frame in &omega_buffer.frames {
+                    file.write_all(&frame.data)
+                        .await
+                        .expect("Unable to write to file");
+                }
+
+                file.flush().await.expect("Unable to flush file");
+                file.sync_all().await.expect("Unable to sync file");
+                println!("File synced");
+
+                let file_size = file
+                    .metadata()
+                    .await
+                    .expect("Unable to get file metadata")
+                    .len();
+                dbg!(MAX_FRAME_BUFFERS);
+                let expected_file_size = if DEBUG_MODE_SAVE_ONCE_OMEGA_BUFFER_FULL {
+                    TRIMMED_ALPHA_FRAME_BITS_COUNT as u64 * MAX_FRAME_BUFFERS as u64
+                } else {
+                    TRIMMED_ALPHA_FRAME_BITS_COUNT as u64 * OMEGA_FRAME_COUNT as u64
+                };
+                assert_eq!(file_size, expected_file_size);
+                println!("File passed size check");
+
+                if ON_START_DELETE_FFMPEG_FILE {
+                    let _ = std::fs::remove_file(FFMPEG_SAVE_PATH);
+                    println!("Deleted ffmpeg file: {}", FFMPEG_SAVE_PATH);
+                }
+
+                let output = tokio::process::Command::new("ffmpeg")
+                    .arg("-f")
+                    .arg("rawvideo")
+                    .arg("-pixel_format")
+                    .arg("bgra")
+                    .arg("-video_size")
+                    .arg(RESOLUTION_WIDTH.to_string() + "x" + &RESOLUTION_HEIGHT.to_string())
+                    .arg("-framerate")
+                    .arg(FRAMERATE_PER_SEC.to_string())
+                    .arg("-i")
+                    .arg(RAW_SAVE_PATH)
+                    .arg("-c:v")
+                    .arg("libx264")
+                    .arg("-pix_fmt")
+                    .arg("yuv444p")
+                    .arg(FFMPEG_SAVE_PATH)
+                    .output();
+
+                match output.await {
+                    Ok(output) => {
+                        println!("stdout: {}", String::from_utf8_lossy(&output.stdout));
+                        println!("stderr: {}", String::from_utf8_lossy(&output.stderr));
+                        println!("exit status: {}", output.status);
+                    }
+                    Err(e) => println!("error: {}", e),
+                }
+
+                break;
+            }
+        }
+    }
+}
+
+impl Frame {
+    fn new() -> Self {
+        let data = Vec::new();
+        Frame { data }
+    }
+}
+
+impl OmegaBuffer {
+    fn new() -> Self {
+        OmegaBuffer {
+            frames: (0..MAX_FRAME_BUFFERS).map(|_| Frame::new()).collect(),
+            current_index: 0,
+            total_frames_count: 0,
+        }
+    }
 }
