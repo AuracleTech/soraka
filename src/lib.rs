@@ -7,62 +7,103 @@ use tokio::io::AsyncWriteExt;
 use win_desktop_duplication::*;
 use win_desktop_duplication::{devices::*, tex_reader::*};
 
+enum ChannelKind {
+    Red,
+    Green,
+    Blue,
+    Alpha,
+}
+
+struct Channel {
+    kind: ChannelKind,
+    depth: u8,
+}
+
+struct Resolution {
+    width: u32,
+    height: u32,
+}
+
+struct VideoFormat {
+    resolution: Resolution,
+    framerate_per_second: u32,
+    channels: Vec<Channel>,
+}
+
 // Settings
-const RESOLUTION_WIDTH: u32 = 2560;
-const RESOLUTION_HEIGHT: u32 = 1440;
-const FRAMERATE_PER_SEC: u32 = 120;
-const COLOR_CHANNEL_COUNT: u8 = 3;
-const _COLOR_BIT_DEPTH: u8 = 8;
-const REPLAY_BUFFER_DURATION: Duration = Duration::from_secs(3);
+const RECORDING_RAW_PATH: &str = "C:\\Users\\DREAD\\Desktop\\_\\recordings\\output.raw";
+const RECORDING_CRAFTED_PATH: &str = "C:\\Users\\DREAD\\Desktop\\_\\recordings\\output.mp4";
+
+lazy_static::lazy_static! {
+    static ref RECORDING_FORMAT: VideoFormat = VideoFormat {
+        resolution: Resolution {
+            width: 2560,
+            height: 1440,
+        },
+        framerate_per_second: 120,
+        channels: vec![
+            Channel {
+                kind: ChannelKind::Red,
+                depth: 8,
+            },
+            Channel {
+                kind: ChannelKind::Green,
+                depth: 8,
+            },
+            Channel {
+                kind: ChannelKind::Blue,
+                depth: 8,
+            },
+        ],
+    };
+    static ref RECORDING_BUFFER_COLOR_CHANNEL_COUNT: u8 = RECORDING_FORMAT.channels.len() as u8;
+    static ref RECORDING_BUFFER_TOTAL_BIT_DEPTH: u8 = RECORDING_FORMAT.channels.iter().map(|c| c.depth).sum();
+    static ref RECORDING_FRAME_COUNT: u32 = RECORDING_FORMAT.framerate_per_second * BUFFER_AMNESIA.as_secs() as u32;
+    static ref RECORDING_BIT_COUNT: usize = (RECORDING_FORMAT.resolution.width * RECORDING_FORMAT.resolution.height) as usize * *RECORDING_BUFFER_TOTAL_BIT_DEPTH as usize;
+    static ref RECORDING_BYTE_COUNT: usize = *RECORDING_BIT_COUNT * BYTE as usize;
+
+    static ref BUFFER_FORMAT: VideoFormat = VideoFormat {
+        resolution: Resolution {
+            width: 2560,
+            height: 1440,
+        },
+        framerate_per_second: 120,
+        channels: vec![
+            Channel {
+                kind: ChannelKind::Red,
+                depth: 8,
+            },
+            Channel {
+                kind: ChannelKind::Green,
+                depth: 8,
+            },
+            Channel {
+                kind: ChannelKind::Blue,
+                depth: 8,
+            },
+            Channel {
+                kind: ChannelKind::Alpha,
+                depth: 8,
+            },
+        ],
+    };
+    static ref BUFFER_COLOR_CHANNEL_COUNT: u8 = BUFFER_FORMAT.channels.len() as u8;
+    static ref BUFFER_TOTAL_BIT_DEPTH: u8 = BUFFER_FORMAT.channels.iter().map(|c| c.depth).sum();
+    static ref BUFFER_FRAME_BIT_COUNT: usize = (BUFFER_FORMAT.resolution.width * BUFFER_FORMAT.resolution.height) as usize * *BUFFER_TOTAL_BIT_DEPTH as usize;
+    static ref BUFFER_FRAME_BYTE_COUNT: usize = *BUFFER_FRAME_BIT_COUNT * BYTE as usize;
+    static ref FRAME_BUFFER_OMEGA_FRAME_COUNT: usize =
+        BUFFER_FORMAT.framerate_per_second as usize * BUFFER_AMNESIA.as_secs() as usize;
+    static ref BUFFER_FRAME_COUNT: usize = RECORDING_FORMAT.framerate_per_second as usize / 30; // TODO based on MAX_RAM_USAGE
+
+}
+
+const TEMP_SAVE_WHEN_BUFFER_FULL: bool = true; // TEMP
+
+const ALLOW_OVERRIDE_RAW_FILE: bool = true;
+const ALLOW_OVERRIDE_CRAFTED_FILE: bool = true;
+
+const BUFFER_AMNESIA: Duration = Duration::from_secs(3);
 const _MAX_RAM_USAGE: u64 = 8 * format::GIGABYTE;
-const RAW_SAVE_PATH: &str = "C:\\Users\\DREAD\\Desktop\\_\\recordings\\output.raw";
-const FFMPEG_SAVE_PATH: &str = "C:\\Users\\DREAD\\Desktop\\_\\recordings\\output.mp4";
-
-const MAX_FRAME_BUFFERS: usize = FRAMERATE_PER_SEC as usize / 30;
-
-const ON_START_DELETE_RAW_FILE: bool = true;
-const ON_START_DELETE_FFMPEG_FILE: bool = true;
-
-const DEBUG_MODE_SAVE_ONCE_OMEGA_BUFFER_FULL: bool = true;
-
-// Precomputation
-// enum ChannelKind {
-//     Red,
-//     Green,
-//     Blue,
-//     Alpha,
-// }
-
-// struct Channel {
-//     kind: ChannelKind,
-//     depth: u8,
-// }
-
-// struct Resolution {
-//     width: u32,
-//     height: u32,
-// }
-
-// struct VideoFormat {
-//     resolution: Resolution,
-//     framerate_per_second: u32,
-//     channels: Vec<Channel>,
-// }
-
-const OMEGA_FRAME_COUNT: usize =
-    FRAMERATE_PER_SEC as usize * REPLAY_BUFFER_DURATION.as_secs() as usize;
-
-const FRAME_BUFFER_RESOLUTION_WIDTH: u32 = RESOLUTION_WIDTH;
-const FRAME_BUFFER_RESOLUTION_HEIGHT: u32 = RESOLUTION_HEIGHT;
-const FRAME_BUFFER_COLOR_CHANNEL_COUNT: u8 = 4;
-const FRAME_BUFFER_COLOR_BIT_DEPTH: u8 = 8;
-const FRAME_BUFFER_BYTES_COUNT: usize = FRAME_BUFFER_RESOLUTION_WIDTH as usize
-    * FRAME_BUFFER_RESOLUTION_HEIGHT as usize
-    * FRAME_BUFFER_COLOR_CHANNEL_COUNT as usize
-    * (FRAME_BUFFER_COLOR_BIT_DEPTH / BYTE) as usize;
-const _FRAME_BUFFER_BITS_COUNT: usize = FRAME_BUFFER_BYTES_COUNT * BYTE as usize;
-
-const TRIMMED_ALPHA_FRAME_BITS_COUNT: usize = (FRAME_BUFFER_BYTES_COUNT / 4) * 3;
 
 #[derive(Clone)]
 struct Frame {
@@ -91,9 +132,9 @@ pub async fn record() {
 
     let mut omega_buffer = OmegaBuffer::new();
 
-    if ON_START_DELETE_RAW_FILE {
-        let _ = std::fs::remove_file(RAW_SAVE_PATH);
-        println!("Deleted raw file: {}", RAW_SAVE_PATH);
+    if ALLOW_OVERRIDE_RAW_FILE {
+        let _ = std::fs::remove_file(RECORDING_RAW_PATH);
+        println!("Deleted raw file: {}", RECORDING_RAW_PATH);
     }
 
     loop {
@@ -105,11 +146,12 @@ pub async fn record() {
                 .get_data(frame_buffer, &tex)
                 .expect("Error getting data");
 
-            frame_buffer.resize(TRIMMED_ALPHA_FRAME_BITS_COUNT, 0);
+            frame_buffer.resize(*RECORDING_BIT_COUNT, 0);
 
             // TODO : double omega for async / threadding
             omega_buffer.current_index += 1;
-            if omega_buffer.current_index >= MAX_FRAME_BUFFERS {
+            omega_buffer.total_frames_count += 1;
+            if omega_buffer.current_index >= *BUFFER_FRAME_COUNT {
                 omega_buffer.current_index = 0;
 
                 // TEMP : stop recording when buffer is full
@@ -119,7 +161,7 @@ pub async fn record() {
                 let mut file = match OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open(RAW_SAVE_PATH)
+                    .open(RECORDING_RAW_PATH)
                     .await
                 {
                     Ok(file) => file,
@@ -141,18 +183,17 @@ pub async fn record() {
                     .await
                     .expect("Unable to get file metadata")
                     .len();
-                dbg!(MAX_FRAME_BUFFERS);
-                let expected_file_size = if DEBUG_MODE_SAVE_ONCE_OMEGA_BUFFER_FULL {
-                    TRIMMED_ALPHA_FRAME_BITS_COUNT as u64 * MAX_FRAME_BUFFERS as u64
+                let expected_file_size = if TEMP_SAVE_WHEN_BUFFER_FULL {
+                    *RECORDING_BIT_COUNT as u64 * *BUFFER_FRAME_COUNT as u64
                 } else {
-                    TRIMMED_ALPHA_FRAME_BITS_COUNT as u64 * OMEGA_FRAME_COUNT as u64
+                    *RECORDING_BIT_COUNT as u64 * *RECORDING_FRAME_COUNT as u64
                 };
                 assert_eq!(file_size, expected_file_size);
                 println!("File passed size check");
 
-                if ON_START_DELETE_FFMPEG_FILE {
-                    let _ = std::fs::remove_file(FFMPEG_SAVE_PATH);
-                    println!("Deleted ffmpeg file: {}", FFMPEG_SAVE_PATH);
+                if ALLOW_OVERRIDE_CRAFTED_FILE {
+                    let _ = std::fs::remove_file(RECORDING_CRAFTED_PATH);
+                    println!("Deleted ffmpeg file: {}", RECORDING_CRAFTED_PATH);
                 }
 
                 let output = tokio::process::Command::new("ffmpeg")
@@ -161,19 +202,23 @@ pub async fn record() {
                     .arg("-pixel_format")
                     .arg("bgra")
                     .arg("-video_size")
-                    .arg(RESOLUTION_WIDTH.to_string() + "x" + &RESOLUTION_HEIGHT.to_string())
+                    .arg(format!(
+                        "{}x{}",
+                        BUFFER_FORMAT.resolution.width, BUFFER_FORMAT.resolution.height
+                    ))
                     .arg("-framerate")
-                    .arg(FRAMERATE_PER_SEC.to_string())
+                    .arg(format!("{}", BUFFER_FORMAT.framerate_per_second))
                     .arg("-i")
-                    .arg(RAW_SAVE_PATH)
+                    .arg(RECORDING_RAW_PATH)
                     .arg("-c:v")
                     .arg("libx264")
                     .arg("-pix_fmt")
                     .arg("yuv444p")
-                    .arg(FFMPEG_SAVE_PATH)
-                    .output();
+                    .arg(RECORDING_CRAFTED_PATH)
+                    .output()
+                    .await;
 
-                match output.await {
+                match output {
                     Ok(output) => {
                         println!("stdout: {}", String::from_utf8_lossy(&output.stdout));
                         println!("stderr: {}", String::from_utf8_lossy(&output.stderr));
@@ -198,7 +243,7 @@ impl Frame {
 impl OmegaBuffer {
     fn new() -> Self {
         OmegaBuffer {
-            frames: (0..MAX_FRAME_BUFFERS).map(|_| Frame::new()).collect(),
+            frames: (0..*BUFFER_FRAME_COUNT).map(|_| Frame::new()).collect(),
             current_index: 0,
             total_frames_count: 0,
         }
