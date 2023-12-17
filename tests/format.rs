@@ -1,22 +1,22 @@
 use std::time::Duration;
 
-use soraka::format::{bytes, duration, GIGABYTE, KILOBYTE, MEGABYTE, PETABYTE, TERABYTE};
+use soraka::format::{duration, reduce, GIGABYTE, KILOBIT, MEGABYTE, PETABYTE, TERABYTE};
 
 #[test]
 fn verify_bytes_formatting() {
-    assert_eq!(bytes(0), "~0.00 bits");
-    assert_eq!(bytes(1), "~1.00 bits");
-    assert_eq!(bytes(KILOBYTE), "~1.00 kilobytes");
-    assert_eq!(bytes(KILOBYTE + 1), "~1.00 kilobytes");
-    assert_eq!(bytes(MEGABYTE), "~1.00 megabytes");
-    assert_eq!(bytes(MEGABYTE + 1), "~1.00 megabytes");
-    assert_eq!(bytes(GIGABYTE), "~1.00 gigabytes");
-    assert_eq!(bytes(GIGABYTE + 1), "~1.00 gigabytes");
-    assert_eq!(bytes(TERABYTE), "~1.00 terabytes");
-    assert_eq!(bytes(TERABYTE + 1), "~1.00 terabytes");
-    assert_eq!(bytes(PETABYTE), "~1.00 petabytes");
-    assert_eq!(bytes(PETABYTE + 1), "~1.00 petabytes");
-    assert_eq!(bytes(PETABYTE * 1024 - 1), "~1024.00 petabytes");
+    assert_eq!(reduce(0), "~0.00 b");
+    assert_eq!(reduce(1), "~1.00 b");
+    assert_eq!(reduce(KILOBIT), "~1.00 KB");
+    assert_eq!(reduce(KILOBIT + 1), "~1.00 KB");
+    assert_eq!(reduce(MEGABYTE), "~1.00 MB");
+    assert_eq!(reduce(MEGABYTE + 1), "~1.00 MB");
+    assert_eq!(reduce(GIGABYTE), "~1.00 GB");
+    assert_eq!(reduce(GIGABYTE + 1), "~1.00 GB");
+    assert_eq!(reduce(TERABYTE), "~1.00 TB");
+    assert_eq!(reduce(TERABYTE + 1), "~1.00 TB");
+    assert_eq!(reduce(PETABYTE), "~1.00 PB");
+    assert_eq!(reduce(PETABYTE + 1), "~1.00 PB");
+    assert_eq!(reduce(PETABYTE * 1024 - 1), "~1024.00 PB");
 }
 
 #[test]

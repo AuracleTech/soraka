@@ -1,6 +1,5 @@
 pub mod format;
 use format::BYTE;
-
 use std::time::Duration;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
@@ -30,6 +29,11 @@ struct VideoFormat {
     channels: Vec<Channel>,
 }
 
+#[derive(Clone)]
+struct Frame {
+    data: Vec<u8>,
+}
+
 impl Frame {
     fn new() -> Self {
         let data = Vec::new();
@@ -37,12 +41,16 @@ impl Frame {
     }
 }
 
+struct VideoBuffer {
+    frames: Vec<Frame>,
+    current_index: usize,
+}
+
 impl VideoBuffer {
     fn new() -> Self {
         VideoBuffer {
             frames: (0..*BUFFER_FRAME_COUNT).map(|_| Frame::new()).collect(),
             current_index: 0,
-            total_frames_count: 0,
         }
     }
 }
@@ -108,30 +116,15 @@ lazy_static::lazy_static! {
     static ref BUFFER_TOTAL_BIT_DEPTH: u8 = BUFFER_FORMAT.channels.iter().map(|c| c.depth).sum();
     static ref BUFFER_FRAME_BIT_COUNT: usize = (BUFFER_FORMAT.resolution.width * BUFFER_FORMAT.resolution.height) as usize * *BUFFER_TOTAL_BIT_DEPTH as usize;
     static ref BUFFER_FRAME_BYTE_COUNT: usize = *BUFFER_FRAME_BIT_COUNT / BYTE as usize;
-    static ref FRAME_BUFFER_OMEGA_FRAME_COUNT: usize =
-        BUFFER_FORMAT.framerate_per_second as usize * BUFFER_AMNESIA.as_secs() as usize;
-    static ref BUFFER_FRAME_COUNT: usize = RECORDING_FORMAT.framerate_per_second as usize / 4; // TODO based on MAX_RAM_USAGE
 
+    static ref _BUFFER_VIDEO_TOTAL_FRAME_COUNT: usize = BUFFER_FORMAT.framerate_per_second as usize * BUFFER_AMNESIA.as_secs() as usize;
+    static ref BUFFER_FRAME_COUNT: usize = MAX_RAM_USAGE_BIT as usize / *BUFFER_FRAME_BIT_COUNT as usize;
 }
 
-const TEMP_SAVE_WHEN_BUFFER_FULL: bool = true; // TEMP
-
-const ALLOW_OVERRIDE_RAW_FILE: bool = true;
 const ALLOW_OVERRIDE_CRAFTED_FILE: bool = true;
 
 const BUFFER_AMNESIA: Duration = Duration::from_secs(3);
-const _MAX_RAM_USAGE: u64 = 8 * format::GIGABYTE;
-
-#[derive(Clone)]
-struct Frame {
-    data: Vec<u8>,
-}
-
-struct VideoBuffer {
-    frames: Vec<Frame>,
-    current_index: usize,
-    total_frames_count: usize,
-}
+const MAX_RAM_USAGE_BIT: u64 = 130 * format::MEGABYTE as u64;
 
 #[tokio::main(flavor = "current_thread")]
 pub async fn record() {
@@ -161,27 +154,21 @@ pub async fn record() {
     assert_eq!(*BUFFER_FRAME_BIT_COUNT, 2560 * 1440 * 4 * 8);
     assert_eq!(*BUFFER_FRAME_BYTE_COUNT, 2560 * 1440 * 4);
 
-    assert_eq!(*FRAME_BUFFER_OMEGA_FRAME_COUNT, 360);
-    assert_eq!(*BUFFER_FRAME_COUNT, 30);
+    assert_eq!(*_BUFFER_VIDEO_TOTAL_FRAME_COUNT, 360);
+    assert_eq!(MAX_RAM_USAGE_BIT, 8 * 1024 * 1024 * 130);
+    assert_eq!(*BUFFER_FRAME_COUNT, 9);
 
     set_process_dpi_awareness();
     co_init();
 
     let adapter = AdapterFactory::new().get_adapter_by_idx(0).unwrap();
     let display = adapter.get_display_by_idx(0).unwrap();
-    println!("Display name: {}", display.name());
+    println!("Display name in use : {}", display.name());
 
     let mut dupl_api = DesktopDuplicationApi::new(adapter, display).unwrap();
-
     let (device, ctx) = dupl_api.get_device_and_ctx();
     let mut texture_reader = TextureReader::new(device, ctx);
-
     let mut omega_buffer = VideoBuffer::new();
-
-    if ALLOW_OVERRIDE_RAW_FILE {
-        let _ = std::fs::remove_file(RECORDING_RAW_PATH);
-        println!("Deleted raw file: {}", RECORDING_RAW_PATH);
-    }
 
     loop {
         let result = dupl_api.acquire_next_vsync_frame().await;
@@ -192,19 +179,21 @@ pub async fn record() {
                 .get_data(frame_buffer, &tex)
                 .expect("Error getting data");
 
-            frame_buffer.resize(*RECORDING_FRAME_BYTE_COUNT, 0);
+            frame_buffer.resize(*RECORDING_FRAME_BIT_COUNT, 0);
 
             // TODO : double omega for async / threadding
             omega_buffer.current_index += 1;
-            omega_buffer.total_frames_count += 1;
+            // if omega_buffer.current_index >= *BUFFER_FRAME_COUNT {
+            //     omega_buffer.current_index = 0;
+            // }
+
             if omega_buffer.current_index >= *BUFFER_FRAME_COUNT {
-                omega_buffer.current_index = 0;
+                println!("Captured {} frames", *BUFFER_FRAME_COUNT);
 
-                // TEMP : stop recording when buffer is full
+                let _ = std::fs::remove_file(RECORDING_RAW_PATH); // TODO : error handling
+                println!("Deleted raw file: {}", RECORDING_RAW_PATH);
 
-                println!("Captured {} frames", omega_buffer.total_frames_count);
-
-                let mut file = match OpenOptions::new()
+                let mut raw = match OpenOptions::new()
                     .create(true)
                     .append(true)
                     .open(RECORDING_RAW_PATH)
@@ -215,26 +204,24 @@ pub async fn record() {
                 };
 
                 for frame in &omega_buffer.frames {
-                    file.write_all(&frame.data)
+                    raw.write_all(&frame.data)
                         .await
                         .expect("Unable to write to file");
                 }
 
-                file.flush().await.expect("Unable to flush file");
-                file.sync_all().await.expect("Unable to sync file");
+                raw.flush().await.expect("Unable to flush file");
+                raw.sync_all().await.expect("Unable to sync file");
                 println!("File synced");
 
-                let file_size = file
+                let file_size = raw
                     .metadata()
                     .await
                     .expect("Unable to get file metadata")
                     .len();
-                let expected_file_size = if TEMP_SAVE_WHEN_BUFFER_FULL {
-                    *RECORDING_FRAME_BIT_COUNT as u64 * *BUFFER_FRAME_COUNT as u64
-                } else {
-                    *RECORDING_FRAME_BIT_COUNT as u64 * *RECORDING_FRAME_COUNT as u64
-                };
-                assert_eq!(file_size, expected_file_size);
+                println!("Raw file size: {}", file_size);
+                let expected = *BUFFER_FRAME_COUNT as u64 * *RECORDING_FRAME_BIT_COUNT as u64; // TODO : replace BUFFER_FRAME_COUNT by RECORDING_FRAME_COUNT
+                println!("Expected file size: {}", expected);
+                assert_eq!(file_size, expected);
                 println!("File passed size check");
 
                 if ALLOW_OVERRIDE_CRAFTED_FILE {

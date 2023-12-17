@@ -1,27 +1,32 @@
 use std::time::Duration;
 
 pub const BYTE: u8 = 8;
-pub const KILOBYTE: u64 = 1024;
-pub const MEGABYTE: u64 = KILOBYTE * 1024;
-pub const GIGABYTE: u64 = MEGABYTE * 1024;
-pub const TERABYTE: u64 = GIGABYTE * 1024;
-pub const PETABYTE: u64 = TERABYTE * 1024;
+pub const KILOBIT: u64 = 1024;
+pub const KILOBYTE: u64 = 1024 * BYTE as u64;
+pub const MEGABIT: u64 = 1024 * KILOBIT;
+pub const MEGABYTE: u64 = 1024 * KILOBYTE;
+pub const GIGABIT: u64 = 1024 * MEGABIT;
+pub const GIGABYTE: u64 = 1024 * MEGABYTE;
+pub const TERABIT: u64 = 1024 * GIGABIT;
+pub const TERABYTE: u64 = 1024 * GIGABYTE;
+pub const PETABIT: u64 = 1024 * TERABIT;
+pub const PETABYTE: u64 = 1024 * TERABYTE;
 
-pub fn bytes(size_in_bits: u64) -> String {
+pub fn reduce(size_in_bits: u64) -> String {
     let size = size_in_bits as f64;
 
-    if size < KILOBYTE as f64 {
-        format!("~{:.2} bits", size)
+    if size < KILOBIT as f64 {
+        format!("~{:.2} b", size)
     } else if size < MEGABYTE as f64 {
-        format!("~{:.2} kilobytes", size / KILOBYTE as f64)
+        format!("~{:.2} KB", size / KILOBIT as f64)
     } else if size < GIGABYTE as f64 {
-        format!("~{:.2} megabytes", size / MEGABYTE as f64)
+        format!("~{:.2} MB", size / MEGABYTE as f64)
     } else if size < TERABYTE as f64 {
-        format!("~{:.2} gigabytes", size / GIGABYTE as f64)
+        format!("~{:.2} GB", size / GIGABYTE as f64)
     } else if size < PETABYTE as f64 {
-        format!("~{:.2} terabytes", size / TERABYTE as f64)
+        format!("~{:.2} TB", size / TERABYTE as f64)
     } else {
-        format!("~{:.2} petabytes", size / PETABYTE as f64)
+        format!("~{:.2} PB", size / PETABYTE as f64)
     }
 }
 
