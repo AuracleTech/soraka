@@ -15,7 +15,7 @@ enum ChannelKind {
 }
 
 struct Channel {
-    kind: ChannelKind,
+    _kind: ChannelKind,
     depth: u8,
 }
 
@@ -28,6 +28,23 @@ struct VideoFormat {
     resolution: Resolution,
     framerate_per_second: u32,
     channels: Vec<Channel>,
+}
+
+impl Frame {
+    fn new() -> Self {
+        let data = Vec::new();
+        Frame { data }
+    }
+}
+
+impl VideoBuffer {
+    fn new() -> Self {
+        VideoBuffer {
+            frames: (0..*BUFFER_FRAME_COUNT).map(|_| Frame::new()).collect(),
+            current_index: 0,
+            total_frames_count: 0,
+        }
+    }
 }
 
 // Settings
@@ -43,15 +60,15 @@ lazy_static::lazy_static! {
         framerate_per_second: 120,
         channels: vec![
             Channel {
-                kind: ChannelKind::Red,
+                _kind: ChannelKind::Red,
                 depth: 8,
             },
             Channel {
-                kind: ChannelKind::Green,
+                _kind: ChannelKind::Green,
                 depth: 8,
             },
             Channel {
-                kind: ChannelKind::Blue,
+                _kind: ChannelKind::Blue,
                 depth: 8,
             },
         ],
@@ -59,8 +76,8 @@ lazy_static::lazy_static! {
     static ref RECORDING_BUFFER_COLOR_CHANNEL_COUNT: u8 = RECORDING_FORMAT.channels.len() as u8;
     static ref RECORDING_BUFFER_TOTAL_BIT_DEPTH: u8 = RECORDING_FORMAT.channels.iter().map(|c| c.depth).sum();
     static ref RECORDING_FRAME_COUNT: u32 = RECORDING_FORMAT.framerate_per_second * BUFFER_AMNESIA.as_secs() as u32;
-    static ref RECORDING_BIT_COUNT: usize = (RECORDING_FORMAT.resolution.width * RECORDING_FORMAT.resolution.height) as usize * *RECORDING_BUFFER_TOTAL_BIT_DEPTH as usize;
-    static ref RECORDING_BYTE_COUNT: usize = *RECORDING_BIT_COUNT * BYTE as usize;
+    static ref RECORDING_FRAME_BIT_COUNT: usize = (RECORDING_FORMAT.resolution.width * RECORDING_FORMAT.resolution.height) as usize * *RECORDING_BUFFER_TOTAL_BIT_DEPTH as usize;
+    static ref RECORDING_FRAME_BYTE_COUNT: usize = *RECORDING_FRAME_BIT_COUNT / BYTE as usize;
 
     static ref BUFFER_FORMAT: VideoFormat = VideoFormat {
         resolution: Resolution {
@@ -70,19 +87,19 @@ lazy_static::lazy_static! {
         framerate_per_second: 120,
         channels: vec![
             Channel {
-                kind: ChannelKind::Red,
+                _kind: ChannelKind::Red,
                 depth: 8,
             },
             Channel {
-                kind: ChannelKind::Green,
+                _kind: ChannelKind::Green,
                 depth: 8,
             },
             Channel {
-                kind: ChannelKind::Blue,
+                _kind: ChannelKind::Blue,
                 depth: 8,
             },
             Channel {
-                kind: ChannelKind::Alpha,
+                _kind: ChannelKind::Alpha,
                 depth: 8,
             },
         ],
@@ -90,10 +107,10 @@ lazy_static::lazy_static! {
     static ref BUFFER_COLOR_CHANNEL_COUNT: u8 = BUFFER_FORMAT.channels.len() as u8;
     static ref BUFFER_TOTAL_BIT_DEPTH: u8 = BUFFER_FORMAT.channels.iter().map(|c| c.depth).sum();
     static ref BUFFER_FRAME_BIT_COUNT: usize = (BUFFER_FORMAT.resolution.width * BUFFER_FORMAT.resolution.height) as usize * *BUFFER_TOTAL_BIT_DEPTH as usize;
-    static ref BUFFER_FRAME_BYTE_COUNT: usize = *BUFFER_FRAME_BIT_COUNT * BYTE as usize;
+    static ref BUFFER_FRAME_BYTE_COUNT: usize = *BUFFER_FRAME_BIT_COUNT / BYTE as usize;
     static ref FRAME_BUFFER_OMEGA_FRAME_COUNT: usize =
         BUFFER_FORMAT.framerate_per_second as usize * BUFFER_AMNESIA.as_secs() as usize;
-    static ref BUFFER_FRAME_COUNT: usize = RECORDING_FORMAT.framerate_per_second as usize / 30; // TODO based on MAX_RAM_USAGE
+    static ref BUFFER_FRAME_COUNT: usize = RECORDING_FORMAT.framerate_per_second as usize / 4; // TODO based on MAX_RAM_USAGE
 
 }
 
@@ -110,7 +127,7 @@ struct Frame {
     data: Vec<u8>,
 }
 
-struct OmegaBuffer {
+struct VideoBuffer {
     frames: Vec<Frame>,
     current_index: usize,
     total_frames_count: usize,
@@ -118,6 +135,35 @@ struct OmegaBuffer {
 
 #[tokio::main(flavor = "current_thread")]
 pub async fn record() {
+    assert_eq!(RECORDING_FORMAT.resolution.width, 2560);
+    assert_eq!(RECORDING_FORMAT.resolution.height, 1440);
+    assert_eq!(RECORDING_FORMAT.framerate_per_second, 120);
+    assert_eq!(RECORDING_FORMAT.channels.len(), 3);
+    assert_eq!(RECORDING_FORMAT.channels[0].depth, 8);
+    assert_eq!(RECORDING_FORMAT.channels[1].depth, 8);
+    assert_eq!(RECORDING_FORMAT.channels[2].depth, 8);
+    assert_eq!(*RECORDING_BUFFER_COLOR_CHANNEL_COUNT, 3);
+    assert_eq!(*RECORDING_BUFFER_TOTAL_BIT_DEPTH, 24);
+    assert_eq!(*RECORDING_FRAME_COUNT, 360);
+    assert_eq!(*RECORDING_FRAME_BIT_COUNT, 2560 * 1440 * 3 * 8);
+    assert_eq!(*RECORDING_FRAME_BYTE_COUNT, 2560 * 1440 * 3);
+
+    assert_eq!(BUFFER_FORMAT.resolution.width, 2560);
+    assert_eq!(BUFFER_FORMAT.resolution.height, 1440);
+    assert_eq!(BUFFER_FORMAT.framerate_per_second, 120);
+    assert_eq!(BUFFER_FORMAT.channels.len(), 4);
+    assert_eq!(BUFFER_FORMAT.channels[0].depth, 8);
+    assert_eq!(BUFFER_FORMAT.channels[1].depth, 8);
+    assert_eq!(BUFFER_FORMAT.channels[2].depth, 8);
+    assert_eq!(BUFFER_FORMAT.channels[3].depth, 8);
+    assert_eq!(*BUFFER_COLOR_CHANNEL_COUNT, 4);
+    assert_eq!(*BUFFER_TOTAL_BIT_DEPTH, 32);
+    assert_eq!(*BUFFER_FRAME_BIT_COUNT, 2560 * 1440 * 4 * 8);
+    assert_eq!(*BUFFER_FRAME_BYTE_COUNT, 2560 * 1440 * 4);
+
+    assert_eq!(*FRAME_BUFFER_OMEGA_FRAME_COUNT, 360);
+    assert_eq!(*BUFFER_FRAME_COUNT, 30);
+
     set_process_dpi_awareness();
     co_init();
 
@@ -130,7 +176,7 @@ pub async fn record() {
     let (device, ctx) = dupl_api.get_device_and_ctx();
     let mut texture_reader = TextureReader::new(device, ctx);
 
-    let mut omega_buffer = OmegaBuffer::new();
+    let mut omega_buffer = VideoBuffer::new();
 
     if ALLOW_OVERRIDE_RAW_FILE {
         let _ = std::fs::remove_file(RECORDING_RAW_PATH);
@@ -146,7 +192,7 @@ pub async fn record() {
                 .get_data(frame_buffer, &tex)
                 .expect("Error getting data");
 
-            frame_buffer.resize(*RECORDING_BIT_COUNT, 0);
+            frame_buffer.resize(*RECORDING_FRAME_BYTE_COUNT, 0);
 
             // TODO : double omega for async / threadding
             omega_buffer.current_index += 1;
@@ -184,9 +230,9 @@ pub async fn record() {
                     .expect("Unable to get file metadata")
                     .len();
                 let expected_file_size = if TEMP_SAVE_WHEN_BUFFER_FULL {
-                    *RECORDING_BIT_COUNT as u64 * *BUFFER_FRAME_COUNT as u64
+                    *RECORDING_FRAME_BIT_COUNT as u64 * *BUFFER_FRAME_COUNT as u64
                 } else {
-                    *RECORDING_BIT_COUNT as u64 * *RECORDING_FRAME_COUNT as u64
+                    *RECORDING_FRAME_BIT_COUNT as u64 * *RECORDING_FRAME_COUNT as u64
                 };
                 assert_eq!(file_size, expected_file_size);
                 println!("File passed size check");
@@ -229,23 +275,6 @@ pub async fn record() {
 
                 break;
             }
-        }
-    }
-}
-
-impl Frame {
-    fn new() -> Self {
-        let data = Vec::new();
-        Frame { data }
-    }
-}
-
-impl OmegaBuffer {
-    fn new() -> Self {
-        OmegaBuffer {
-            frames: (0..*BUFFER_FRAME_COUNT).map(|_| Frame::new()).collect(),
-            current_index: 0,
-            total_frames_count: 0,
         }
     }
 }
