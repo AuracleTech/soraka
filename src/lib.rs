@@ -173,25 +173,42 @@ pub async fn record() {
     loop {
         let result = dupl_api.acquire_next_vsync_frame().await;
         if let Ok(tex) = result {
-            let frame_buffer = &mut omega_buffer.frames[omega_buffer.current_index].data;
+            let buffer = &mut omega_buffer.frames[omega_buffer.current_index].data;
 
             texture_reader
-                .get_data(frame_buffer, &tex)
+                .get_data(buffer, &tex)
                 .expect("Error getting data");
 
-            frame_buffer.resize(*RECORDING_FRAME_BIT_COUNT, 0);
+            let buffer_bit_size = buffer.len() * BYTE as usize;
+
+            if buffer_bit_size < *RECORDING_FRAME_BIT_COUNT {
+                buffer.resize(*RECORDING_FRAME_BIT_COUNT, 0);
+            } else if buffer_bit_size > *RECORDING_FRAME_BIT_COUNT {
+                buffer.truncate(*RECORDING_FRAME_BIT_COUNT);
+            }
+
+            println!(
+                "Frame size: {} bits, {} bytes",
+                buffer_bit_size,
+                buffer_bit_size / BYTE as usize
+            );
 
             // TODO : double omega for async / threadding
-            omega_buffer.current_index += 1;
             // if omega_buffer.current_index >= *BUFFER_FRAME_COUNT {
             //     omega_buffer.current_index = 0;
             // }
 
+            omega_buffer.current_index += 1;
+
             if omega_buffer.current_index >= *BUFFER_FRAME_COUNT {
                 println!("Captured {} frames", *BUFFER_FRAME_COUNT);
 
-                let _ = std::fs::remove_file(RECORDING_RAW_PATH); // TODO : error handling
-                println!("Deleted raw file: {}", RECORDING_RAW_PATH);
+                if let Err(err) = std::fs::remove_file(RECORDING_RAW_PATH) {
+                    // TODO : error handling
+                    eprintln!("Unable to delete file: {}", err);
+                } else {
+                    println!("Deleted raw file: {}", RECORDING_RAW_PATH);
+                }
 
                 let mut raw = match OpenOptions::new()
                     .create(true)
@@ -202,31 +219,38 @@ pub async fn record() {
                     Ok(file) => file,
                     Err(e) => panic!("Error creating file: {}", e),
                 };
+                println!("Raw file opened");
 
                 for frame in &omega_buffer.frames {
                     raw.write_all(&frame.data)
                         .await
                         .expect("Unable to write to file");
                 }
+                println!("Raw file written");
 
                 raw.flush().await.expect("Unable to flush file");
                 raw.sync_all().await.expect("Unable to sync file");
-                println!("File synced");
+                println!("Raw file flushed");
 
-                let file_size = raw
+                let file_bit_size = raw
                     .metadata()
                     .await
                     .expect("Unable to get file metadata")
-                    .len();
-                println!("Raw file size: {}", file_size);
-                let expected = *BUFFER_FRAME_COUNT as u64 * *RECORDING_FRAME_BIT_COUNT as u64; // TODO : replace BUFFER_FRAME_COUNT by RECORDING_FRAME_COUNT
+                    .len()
+                    * BYTE as u64;
+                println!("Raw file size: {}", file_bit_size);
+                let expected = *BUFFER_FRAME_COUNT as u64 * *BUFFER_FRAME_BIT_COUNT as u64; // TODO : replace RECORDING_FRAME_BIT_COUNT by RECORDING_FRAME_BYTE_COUNT
                 println!("Expected file size: {}", expected);
-                assert_eq!(file_size, expected);
+                assert_eq!(file_bit_size, expected);
                 println!("File passed size check");
 
                 if ALLOW_OVERRIDE_CRAFTED_FILE {
-                    let _ = std::fs::remove_file(RECORDING_CRAFTED_PATH);
-                    println!("Deleted ffmpeg file: {}", RECORDING_CRAFTED_PATH);
+                    if let Err(err) = std::fs::remove_file(RECORDING_CRAFTED_PATH) {
+                        // TODO : error handling
+                        eprintln!("Unable to delete file: {}", err);
+                    } else {
+                        println!("Deleted crafted file: {}", RECORDING_CRAFTED_PATH);
+                    }
                 }
 
                 let output = tokio::process::Command::new("ffmpeg")
@@ -246,7 +270,7 @@ pub async fn record() {
                     .arg("-c:v")
                     .arg("libx264")
                     .arg("-pix_fmt")
-                    .arg("yuv444p")
+                    .arg("yuv422p")
                     .arg(RECORDING_CRAFTED_PATH)
                     .output()
                     .await;
