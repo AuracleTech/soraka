@@ -1,5 +1,6 @@
 pub mod format;
 use format::BYTE;
+use std::path::Path;
 use std::time::Duration;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
@@ -56,10 +57,13 @@ impl VideoBuffer {
 }
 
 // Settings
-const RECORDING_RAW_PATH: &str = "C:\\Users\\DREAD\\Desktop\\_\\recordings\\output.raw";
-const RECORDING_CRAFTED_PATH: &str = "C:\\Users\\DREAD\\Desktop\\_\\recordings\\output.mp4";
+const PREFERRED_MAX_RAM_USAGE_BIT: usize = 2 * format::GIGABYTE as usize;
+const BUFFER_AMNESIA: Duration = Duration::from_secs(3);
+
+const PATH_STR: &str = "C:\\Users\\DREAD\\Desktop\\_\\recordings\\";
 
 lazy_static::lazy_static! {
+    static ref RECORDING_FOLDER: &'static Path = Path::new(PATH_STR);
     static ref RECORDING_FORMAT: VideoFormat = VideoFormat {
         resolution: Resolution {
             width: 2560,
@@ -116,48 +120,23 @@ lazy_static::lazy_static! {
     static ref BUFFER_TOTAL_BIT_DEPTH: u8 = BUFFER_FORMAT.channels.iter().map(|c| c.depth).sum();
     static ref BUFFER_FRAME_BIT_COUNT: usize = (BUFFER_FORMAT.resolution.width * BUFFER_FORMAT.resolution.height) as usize * *BUFFER_TOTAL_BIT_DEPTH as usize;
     static ref BUFFER_FRAME_BYTE_COUNT: usize = *BUFFER_FRAME_BIT_COUNT / BYTE as usize;
+    static ref BUFFER_VIDEO_TOTAL_FRAME_COUNT: usize = BUFFER_FORMAT.framerate_per_second as usize * BUFFER_AMNESIA.as_secs() as usize;
+    static ref BUFFER_FRAME_COUNT: usize = if (PREFERRED_MAX_RAM_USAGE_BIT  / *BUFFER_FRAME_BIT_COUNT) >= *BUFFER_VIDEO_TOTAL_FRAME_COUNT {
+        *BUFFER_VIDEO_TOTAL_FRAME_COUNT
+    } else {
+       PREFERRED_MAX_RAM_USAGE_BIT as usize / *BUFFER_FRAME_BIT_COUNT
+    };
 
-    static ref _BUFFER_VIDEO_TOTAL_FRAME_COUNT: usize = BUFFER_FORMAT.framerate_per_second as usize * BUFFER_AMNESIA.as_secs() as usize;
-    static ref BUFFER_FRAME_COUNT: usize = MAX_RAM_USAGE_BIT as usize / *BUFFER_FRAME_BIT_COUNT as usize;
+
+
+
+
+    // MAX_RAM_USAGE_BIT as usize / *BUFFER_FRAME_BIT_COUNT as usize;
+
 }
-
-const ALLOW_OVERRIDE_CRAFTED_FILE: bool = true;
-
-const BUFFER_AMNESIA: Duration = Duration::from_secs(3);
-const MAX_RAM_USAGE_BIT: u64 = 130 * format::MEGABYTE as u64;
 
 #[tokio::main(flavor = "current_thread")]
 pub async fn record() {
-    assert_eq!(RECORDING_FORMAT.resolution.width, 2560);
-    assert_eq!(RECORDING_FORMAT.resolution.height, 1440);
-    assert_eq!(RECORDING_FORMAT.framerate_per_second, 120);
-    assert_eq!(RECORDING_FORMAT.channels.len(), 3);
-    assert_eq!(RECORDING_FORMAT.channels[0].depth, 8);
-    assert_eq!(RECORDING_FORMAT.channels[1].depth, 8);
-    assert_eq!(RECORDING_FORMAT.channels[2].depth, 8);
-    assert_eq!(*RECORDING_BUFFER_COLOR_CHANNEL_COUNT, 3);
-    assert_eq!(*RECORDING_BUFFER_TOTAL_BIT_DEPTH, 24);
-    assert_eq!(*RECORDING_FRAME_COUNT, 360);
-    assert_eq!(*RECORDING_FRAME_BIT_COUNT, 2560 * 1440 * 3 * 8);
-    assert_eq!(*RECORDING_FRAME_BYTE_COUNT, 2560 * 1440 * 3);
-
-    assert_eq!(BUFFER_FORMAT.resolution.width, 2560);
-    assert_eq!(BUFFER_FORMAT.resolution.height, 1440);
-    assert_eq!(BUFFER_FORMAT.framerate_per_second, 120);
-    assert_eq!(BUFFER_FORMAT.channels.len(), 4);
-    assert_eq!(BUFFER_FORMAT.channels[0].depth, 8);
-    assert_eq!(BUFFER_FORMAT.channels[1].depth, 8);
-    assert_eq!(BUFFER_FORMAT.channels[2].depth, 8);
-    assert_eq!(BUFFER_FORMAT.channels[3].depth, 8);
-    assert_eq!(*BUFFER_COLOR_CHANNEL_COUNT, 4);
-    assert_eq!(*BUFFER_TOTAL_BIT_DEPTH, 32);
-    assert_eq!(*BUFFER_FRAME_BIT_COUNT, 2560 * 1440 * 4 * 8);
-    assert_eq!(*BUFFER_FRAME_BYTE_COUNT, 2560 * 1440 * 4);
-
-    assert_eq!(*_BUFFER_VIDEO_TOTAL_FRAME_COUNT, 360);
-    assert_eq!(MAX_RAM_USAGE_BIT, 8 * 1024 * 1024 * 130);
-    assert_eq!(*BUFFER_FRAME_COUNT, 9);
-
     set_process_dpi_awareness();
     co_init();
 
@@ -203,17 +182,19 @@ pub async fn record() {
             if omega_buffer.current_index >= *BUFFER_FRAME_COUNT {
                 println!("Captured {} frames", *BUFFER_FRAME_COUNT);
 
-                if let Err(err) = std::fs::remove_file(RECORDING_RAW_PATH) {
-                    // TODO : error handling
-                    eprintln!("Unable to delete file: {}", err);
-                } else {
-                    println!("Deleted raw file: {}", RECORDING_RAW_PATH);
-                }
+                let timestamp = chrono::Utc::now().timestamp();
+                let raw_file_name = format!("raw{}.raw", timestamp);
+                let raw_full_path = RECORDING_FOLDER.join(raw_file_name);
+                println!("Raw file path: {}", raw_full_path.display());
+
+                let crafted_file_name = format!("crafted{}.mp4", timestamp);
+                let crafted_full_path = RECORDING_FOLDER.join(crafted_file_name);
+                println!("Crafted file path: {}", crafted_full_path.display());
 
                 let mut raw = match OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open(RECORDING_RAW_PATH)
+                    .open(&raw_full_path)
                     .await
                 {
                     Ok(file) => file,
@@ -244,15 +225,6 @@ pub async fn record() {
                 assert_eq!(file_bit_size, expected);
                 println!("File passed size check");
 
-                if ALLOW_OVERRIDE_CRAFTED_FILE {
-                    if let Err(err) = std::fs::remove_file(RECORDING_CRAFTED_PATH) {
-                        // TODO : error handling
-                        eprintln!("Unable to delete file: {}", err);
-                    } else {
-                        println!("Deleted crafted file: {}", RECORDING_CRAFTED_PATH);
-                    }
-                }
-
                 let output = tokio::process::Command::new("ffmpeg")
                     .arg("-f")
                     .arg("rawvideo")
@@ -266,12 +238,12 @@ pub async fn record() {
                     .arg("-framerate")
                     .arg(format!("{}", BUFFER_FORMAT.framerate_per_second))
                     .arg("-i")
-                    .arg(RECORDING_RAW_PATH)
+                    .arg(raw_full_path)
                     .arg("-c:v")
                     .arg("libx264")
                     .arg("-pix_fmt")
-                    .arg("yuv422p")
-                    .arg(RECORDING_CRAFTED_PATH)
+                    .arg("yuv444p")
+                    .arg(crafted_full_path)
                     .output()
                     .await;
 

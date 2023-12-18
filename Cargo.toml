@@ -14,3 +14,5 @@ winapi = "0.3.9"
 winit = "0.29.4"
 tokio = { version = "1.35.0", features = ["full"] }
 lazy_static = "1.4.0"
+chrono = "0.4.31"
+systray = "0.4.0"
