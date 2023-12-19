@@ -4,8 +4,14 @@ use std::path::Path;
 use std::time::Duration;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
+use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::TrayIconBuilder;
 use win_desktop_duplication::*;
 use win_desktop_duplication::{devices::*, tex_reader::*};
+use winit::event_loop::EventLoopBuilder;
+
+const CRATE_NAME: &str = env!("CARGO_PKG_NAME");
+const CRATE_DESCRIPTION: &str = env!("CARGO_PKG_DESCRIPTION");
 
 enum ChannelKind {
     Red,
@@ -126,30 +132,119 @@ lazy_static::lazy_static! {
     } else {
        PREFERRED_MAX_RAM_USAGE_BIT as usize / *BUFFER_FRAME_BIT_COUNT
     };
-
-
-
-
-
-    // MAX_RAM_USAGE_BIT as usize / *BUFFER_FRAME_BIT_COUNT as usize;
-
 }
 
-#[tokio::main(flavor = "current_thread")]
+fn load_icon(path: &std::path::Path) -> tray_icon::Icon {
+    let (icon_rgba, icon_width, icon_height) = {
+        let image = image::open(path)
+            .expect("Failed to open icon path")
+            .into_rgba8();
+        let (width, height) = image.dimensions();
+        let rgba = image.into_raw();
+        (rgba, width, height)
+    };
+    tray_icon::Icon::from_rgba(icon_rgba, icon_width, icon_height).expect("Failed to open icon")
+}
+
+const TOGGLE_TEXT_PAUSE: &'static str = "Pause buffering";
+const TOGGLE_TEXT_RESUME: &'static str = "Resume buffering";
+
+#[tokio::main]
 pub async fn record() {
+    let mut buffering = true;
+
+    let icon_on_path = concat!(env!("CARGO_MANIFEST_DIR"), "./assets/on.png");
+    let icon_on = load_icon(std::path::Path::new(icon_on_path));
+
+    let icon_off_path = concat!(env!("CARGO_MANIFEST_DIR"), "./assets/off.png");
+    let icon_off = load_icon(std::path::Path::new(icon_off_path));
+
+    let toggle_item = MenuItem::new(TOGGLE_TEXT_PAUSE, true, None);
+    let separator = PredefinedMenuItem::separator();
+    let quit_item = MenuItem::new("Quit", true, None);
+
+    let tray_menu = Menu::new();
+    tray_menu
+        .append_items(&[&toggle_item, &separator, &quit_item])
+        .expect("Failed to add menu items");
+
+    let tray_icon = TrayIconBuilder::new()
+        .with_menu(Box::new(tray_menu))
+        .with_tooltip(format!("{} - {}", CRATE_NAME, CRATE_DESCRIPTION))
+        .with_icon(icon_on.clone())
+        .build()
+        .expect("Failed to create tray icon");
+
+    let menu_channel = MenuEvent::receiver();
+
+    let event_loop = EventLoopBuilder::new()
+        .build()
+        .expect("Failed to build event loop");
+
+    event_loop
+        .run(move |event, _| {
+            println!("Event: {:?}", event);
+            match menu_channel.try_recv() {
+                Ok(menu_event) => match menu_event.id {
+                    id if id == toggle_item.id().0 => {
+                        println!("Pause menu item clicked");
+                        let text = if buffering {
+                            buffering = false;
+                            tray_icon
+                                .set_icon(Some(icon_off.clone()))
+                                .expect("Failed to set icon");
+                            TOGGLE_TEXT_RESUME
+                        } else {
+                            buffering = true;
+                            tray_icon
+                                .set_icon(Some(icon_on.clone()))
+                                .expect("Failed to set icon");
+                            TOGGLE_TEXT_PAUSE
+                        };
+                        toggle_item.set_text(text);
+                    }
+                    id if id == quit_item.id().0 => {
+                        println!("Quitting...");
+                        tray_icon
+                            .set_visible(false)
+                            .expect("Failed to hide tray icon");
+                        std::process::exit(0);
+                    }
+                    _ => (),
+                },
+                _ => {}
+            }
+        })
+        .expect("Event loop failed");
+
+    println!("Exiting...");
+
+    // SECTION SEPARATOR
+
+    println!("Buffer frame count: {}", *BUFFER_FRAME_COUNT);
+
     set_process_dpi_awareness();
     co_init();
 
-    let adapter = AdapterFactory::new().get_adapter_by_idx(0).unwrap();
-    let display = adapter.get_display_by_idx(0).unwrap();
+    let adapter = AdapterFactory::new()
+        .get_adapter_by_idx(0)
+        .expect("Adapter not found");
+    let display = adapter.get_display_by_idx(0).expect("Display not found");
     println!("Display name in use : {}", display.name());
 
-    let mut dupl_api = DesktopDuplicationApi::new(adapter, display).unwrap();
+    let mut dupl_api = DesktopDuplicationApi::new(adapter, display).expect("Duplication API error");
     let (device, ctx) = dupl_api.get_device_and_ctx();
     let mut texture_reader = TextureReader::new(device, ctx);
     let mut omega_buffer = VideoBuffer::new();
 
     loop {
+        println!("Buffering: {}", buffering);
+
+        continue;
+        if !buffering {
+            continue;
+        }
+
         let result = dupl_api.acquire_next_vsync_frame().await;
         if let Ok(tex) = result {
             let buffer = &mut omega_buffer.frames[omega_buffer.current_index].data;
