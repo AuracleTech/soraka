@@ -1,9 +1,9 @@
 pub mod format;
 use format::BYTE;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
-use tokio::fs::OpenOptions;
-use tokio::io::AsyncWriteExt;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::TrayIconBuilder;
 use win_desktop_duplication::*;
@@ -146,8 +146,15 @@ fn load_icon(path: &std::path::Path) -> tray_icon::Icon {
     tray_icon::Icon::from_rgba(icon_rgba, icon_width, icon_height).expect("Failed to open icon")
 }
 
+#[derive(Debug, Clone, Copy)]
+enum CustomEvent {
+    Exit,
+}
+
+const SAVE_TEXT: &'static str = "Save buffer";
 const TOGGLE_TEXT_PAUSE: &'static str = "Pause buffering";
 const TOGGLE_TEXT_RESUME: &'static str = "Resume buffering";
+const QUIT_TEXT: &'static str = "Quit";
 
 #[tokio::main]
 pub async fn record() {
@@ -159,13 +166,14 @@ pub async fn record() {
     let icon_off_path = concat!(env!("CARGO_MANIFEST_DIR"), "./assets/off.png");
     let icon_off = load_icon(std::path::Path::new(icon_off_path));
 
+    let save_item = MenuItem::new(SAVE_TEXT, true, None);
     let toggle_item = MenuItem::new(TOGGLE_TEXT_PAUSE, true, None);
     let separator = PredefinedMenuItem::separator();
-    let quit_item = MenuItem::new("Quit", true, None);
+    let quit_item = MenuItem::new(QUIT_TEXT, true, None);
 
     let tray_menu = Menu::new();
     tray_menu
-        .append_items(&[&toggle_item, &separator, &quit_item])
+        .append_items(&[&save_item, &separator, &toggle_item, &separator, &quit_item])
         .expect("Failed to add menu items");
 
     let tray_icon = TrayIconBuilder::new()
@@ -181,45 +189,9 @@ pub async fn record() {
         .build()
         .expect("Failed to build event loop");
 
-    event_loop
-        .run(move |event, _| {
-            println!("Event: {:?}", event);
-            match menu_channel.try_recv() {
-                Ok(menu_event) => match menu_event.id {
-                    id if id == toggle_item.id().0 => {
-                        println!("Pause menu item clicked");
-                        let text = if buffering {
-                            buffering = false;
-                            tray_icon
-                                .set_icon(Some(icon_off.clone()))
-                                .expect("Failed to set icon");
-                            TOGGLE_TEXT_RESUME
-                        } else {
-                            buffering = true;
-                            tray_icon
-                                .set_icon(Some(icon_on.clone()))
-                                .expect("Failed to set icon");
-                            TOGGLE_TEXT_PAUSE
-                        };
-                        toggle_item.set_text(text);
-                    }
-                    id if id == quit_item.id().0 => {
-                        println!("Quitting...");
-                        tray_icon
-                            .set_visible(false)
-                            .expect("Failed to hide tray icon");
-                        std::process::exit(0);
-                    }
-                    _ => (),
-                },
-                _ => {}
-            }
-        })
-        .expect("Event loop failed");
+    event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
 
-    println!("Exiting...");
-
-    // SECTION SEPARATOR
+    // SECTION INIT SORAKA
 
     println!("Buffer frame count: {}", *BUFFER_FRAME_COUNT);
 
@@ -237,122 +209,187 @@ pub async fn record() {
     let mut texture_reader = TextureReader::new(device, ctx);
     let mut omega_buffer = VideoBuffer::new();
 
-    loop {
-        println!("Buffering: {}", buffering);
+    let mut instant = std::time::Instant::now();
 
-        continue;
-        if !buffering {
-            continue;
-        }
+    // SECTION END INIT SORAKA
 
-        let result = dupl_api.acquire_next_vsync_frame().await;
-        if let Ok(tex) = result {
-            let buffer = &mut omega_buffer.frames[omega_buffer.current_index].data;
-
-            texture_reader
-                .get_data(buffer, &tex)
-                .expect("Error getting data");
-
-            let buffer_bit_size = buffer.len() * BYTE as usize;
-
-            if buffer_bit_size < *RECORDING_FRAME_BIT_COUNT {
-                buffer.resize(*RECORDING_FRAME_BIT_COUNT, 0);
-            } else if buffer_bit_size > *RECORDING_FRAME_BIT_COUNT {
-                buffer.truncate(*RECORDING_FRAME_BIT_COUNT);
-            }
-
-            println!(
-                "Frame size: {} bits, {} bytes",
-                buffer_bit_size,
-                buffer_bit_size / BYTE as usize
-            );
-
-            // TODO : double omega for async / threadding
-            // if omega_buffer.current_index >= *BUFFER_FRAME_COUNT {
-            //     omega_buffer.current_index = 0;
-            // }
-
-            omega_buffer.current_index += 1;
-
-            if omega_buffer.current_index >= *BUFFER_FRAME_COUNT {
-                println!("Captured {} frames", *BUFFER_FRAME_COUNT);
-
-                let timestamp = chrono::Utc::now().timestamp();
-                let raw_file_name = format!("raw{}.raw", timestamp);
-                let raw_full_path = RECORDING_FOLDER.join(raw_file_name);
-                println!("Raw file path: {}", raw_full_path.display());
-
-                let crafted_file_name = format!("crafted{}.mp4", timestamp);
-                let crafted_full_path = RECORDING_FOLDER.join(crafted_file_name);
-                println!("Crafted file path: {}", crafted_full_path.display());
-
-                let mut raw = match OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&raw_full_path)
-                    .await
-                {
-                    Ok(file) => file,
-                    Err(e) => panic!("Error creating file: {}", e),
-                };
-                println!("Raw file opened");
-
-                for frame in &omega_buffer.frames {
-                    raw.write_all(&frame.data)
-                        .await
-                        .expect("Unable to write to file");
+    event_loop
+        .run(
+            move |event, elwt: &winit::event_loop::EventLoopWindowTarget<()>| {
+                match menu_channel.try_recv() {
+                    Ok(menu_event) => match menu_event.id {
+                        id if id == toggle_item.id().0 => {
+                            println!("Pause menu item clicked");
+                            let text = if buffering {
+                                buffering = false;
+                                tray_icon
+                                    .set_icon(Some(icon_off.clone()))
+                                    .expect("Failed to set icon");
+                                TOGGLE_TEXT_RESUME
+                            } else {
+                                buffering = true;
+                                tray_icon
+                                    .set_icon(Some(icon_on.clone()))
+                                    .expect("Failed to set icon");
+                                TOGGLE_TEXT_PAUSE
+                            };
+                            toggle_item.set_text(text);
+                        }
+                        id if id == quit_item.id().0 => {
+                            println!("Quitting...");
+                            elwt.exit();
+                        }
+                        _ => (),
+                    },
+                    _ => {}
                 }
-                println!("Raw file written");
 
-                raw.flush().await.expect("Unable to flush file");
-                raw.sync_all().await.expect("Unable to sync file");
-                println!("Raw file flushed");
-
-                let file_bit_size = raw
-                    .metadata()
-                    .await
-                    .expect("Unable to get file metadata")
-                    .len()
-                    * BYTE as u64;
-                println!("Raw file size: {}", file_bit_size);
-                let expected = *BUFFER_FRAME_COUNT as u64 * *BUFFER_FRAME_BIT_COUNT as u64; // TODO : replace RECORDING_FRAME_BIT_COUNT by RECORDING_FRAME_BYTE_COUNT
-                println!("Expected file size: {}", expected);
-                assert_eq!(file_bit_size, expected);
-                println!("File passed size check");
-
-                let output = tokio::process::Command::new("ffmpeg")
-                    .arg("-f")
-                    .arg("rawvideo")
-                    .arg("-pixel_format")
-                    .arg("bgra")
-                    .arg("-video_size")
-                    .arg(format!(
-                        "{}x{}",
-                        BUFFER_FORMAT.resolution.width, BUFFER_FORMAT.resolution.height
-                    ))
-                    .arg("-framerate")
-                    .arg(format!("{}", BUFFER_FORMAT.framerate_per_second))
-                    .arg("-i")
-                    .arg(raw_full_path)
-                    .arg("-c:v")
-                    .arg("libx264")
-                    .arg("-pix_fmt")
-                    .arg("yuv444p")
-                    .arg(crafted_full_path)
-                    .output()
-                    .await;
-
-                match output {
-                    Ok(output) => {
-                        println!("stdout: {}", String::from_utf8_lossy(&output.stdout));
-                        println!("stderr: {}", String::from_utf8_lossy(&output.stderr));
-                        println!("exit status: {}", output.status);
+                println!("Event: {:?}", event);
+                match event {
+                    winit::event::Event::LoopExiting => {
+                        tray_icon
+                            .set_visible(false)
+                            .expect("Failed to hide tray icon");
+                        return;
                     }
-                    Err(e) => println!("error: {}", e),
+
+                    winit::event::Event::NewEvents(
+                        winit::event::StartCause::ResumeTimeReached {
+                            start,
+                            requested_resume,
+                        },
+                    ) => {
+                        instant = start;
+                        println!("Resuming buffering: {}", buffering);
+
+                        if buffering {
+                            let result = dupl_api.acquire_next_frame_now();
+                            if let Ok(tex) = result {
+                                let buffer =
+                                    &mut omega_buffer.frames[omega_buffer.current_index].data;
+
+                                texture_reader
+                                    .get_data(buffer, &tex)
+                                    .expect("Error getting data");
+
+                                let buffer_bit_size = buffer.len() * BYTE as usize;
+
+                                if buffer_bit_size < *RECORDING_FRAME_BIT_COUNT {
+                                    buffer.resize(*RECORDING_FRAME_BIT_COUNT, 0);
+                                } else if buffer_bit_size > *RECORDING_FRAME_BIT_COUNT {
+                                    buffer.truncate(*RECORDING_FRAME_BIT_COUNT);
+                                }
+
+                                println!(
+                                    "Frame size: {} bits, {} bytes",
+                                    buffer_bit_size,
+                                    buffer_bit_size / BYTE as usize
+                                );
+
+                                // TODO : double omega for async / threadding
+                                // if omega_buffer.current_index >= *BUFFER_FRAME_COUNT {
+                                //     omega_buffer.current_index = 0;
+                                // }
+
+                                omega_buffer.current_index += 1;
+
+                                if omega_buffer.current_index >= *BUFFER_FRAME_COUNT {
+                                    println!("Captured {} frames", *BUFFER_FRAME_COUNT);
+
+                                    let timestamp = chrono::Utc::now().timestamp();
+                                    let raw_file_name = format!("raw{}.raw", timestamp);
+                                    let raw_full_path = RECORDING_FOLDER.join(raw_file_name);
+                                    println!("Raw file path: {}", raw_full_path.display());
+
+                                    let crafted_file_name = format!("crafted{}.mp4", timestamp);
+                                    let crafted_full_path =
+                                        RECORDING_FOLDER.join(crafted_file_name);
+                                    println!("Crafted file path: {}", crafted_full_path.display());
+
+                                    let mut raw = match OpenOptions::new()
+                                        .create(true)
+                                        .append(true)
+                                        .open(&raw_full_path)
+                                    {
+                                        Ok(file) => file,
+                                        Err(e) => panic!("Error creating file: {}", e),
+                                    };
+                                    println!("Raw file opened");
+
+                                    for frame in &omega_buffer.frames {
+                                        raw.write_all(&frame.data)
+                                            .expect("Unable to write to file");
+                                    }
+                                    println!("Raw file written");
+
+                                    raw.flush().expect("Unable to flush file");
+                                    raw.sync_all().expect("Unable to sync file");
+                                    println!("Raw file flushed");
+
+                                    let file_bit_size =
+                                        raw.metadata().expect("Unable to get file metadata").len()
+                                            * BYTE as u64;
+                                    println!("Raw file size: {}", file_bit_size);
+                                    let expected =
+                                        *BUFFER_FRAME_COUNT as u64 * *BUFFER_FRAME_BIT_COUNT as u64; // TODO : replace RECORDING_FRAME_BIT_COUNT by RECORDING_FRAME_BYTE_COUNT
+                                    println!("Expected file size: {}", expected);
+                                    assert_eq!(file_bit_size, expected);
+                                    println!("File passed size check");
+
+                                    let output = std::process::Command::new("ffmpeg")
+                                        .arg("-f")
+                                        .arg("rawvideo")
+                                        .arg("-pixel_format")
+                                        .arg("bgra")
+                                        .arg("-video_size")
+                                        .arg(format!(
+                                            "{}x{}",
+                                            BUFFER_FORMAT.resolution.width,
+                                            BUFFER_FORMAT.resolution.height
+                                        ))
+                                        .arg("-framerate")
+                                        .arg(format!("{}", BUFFER_FORMAT.framerate_per_second))
+                                        .arg("-i")
+                                        .arg(raw_full_path)
+                                        .arg("-c:v")
+                                        .arg("libx264")
+                                        .arg("-pix_fmt")
+                                        .arg("yuv444p")
+                                        .arg(crafted_full_path)
+                                        .output();
+
+                                    match output {
+                                        Ok(output) => {
+                                            println!(
+                                                "stdout: {}",
+                                                String::from_utf8_lossy(&output.stdout)
+                                            );
+                                            println!(
+                                                "stderr: {}",
+                                                String::from_utf8_lossy(&output.stderr)
+                                            );
+                                            println!("exit status: {}", output.status);
+                                        }
+                                        Err(e) => println!("error: {}", e),
+                                    }
+
+                                    elwt.exit();
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
                 }
 
-                break;
-            }
-        }
-    }
+                elwt.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+                    instant
+                        + Duration::from_secs_f64(
+                            1.0 / RECORDING_FORMAT.framerate_per_second as f64,
+                        ),
+                ));
+            },
+        )
+        .expect("Event loop failed");
+
+    println!("Exiting...");
 }

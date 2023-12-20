@@ -896,6 +896,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "global-hotkey"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d505f007b733fc3b3261ca0710e7e689411422ace5f5b2a63a14d8596159db23"
+dependencies = [
+ "crossbeam-channel",
+ "keyboard-types",
+ "once_cell",
+ "thiserror",
+ "windows-sys 0.52.0",
+ "x11-dl",
+]
+
+[[package]]
 name = "gobject-sys"
 version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1881,6 +1895,7 @@ name = "soraka"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "global-hotkey",
  "image",
  "lazy_static",
  "tokio",
