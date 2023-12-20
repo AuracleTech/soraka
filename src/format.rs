@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+#[allow(dead_code)]
 pub const BYTE: u8 = 8;
 pub const KILOBIT: u64 = 1024;
 pub const KILOBYTE: u64 = 1024 * BYTE as u64;

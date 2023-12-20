@@ -4,7 +4,7 @@
 		{
 			"label": "Run example",
 			"type": "shell",
-			"command": "cargo run --example example",
+			"command": "cargo run",
 			"problemMatcher": "$rustc",
 			"dependsOn": ["Run tests"],
 			"group": {
