@@ -13,21 +13,19 @@ pub const TERABYTE: u64 = 1024 * GIGABYTE;
 pub const PETABIT: u64 = 1024 * TERABIT;
 pub const PETABYTE: u64 = 1024 * TERABYTE;
 
-pub fn reduce(size_in_bits: u64) -> String {
-    let size = size_in_bits as f64;
-
-    if size < KILOBIT as f64 {
-        format!("~{:.2} b", size)
-    } else if size < MEGABYTE as f64 {
-        format!("~{:.2} KB", size / KILOBIT as f64)
-    } else if size < GIGABYTE as f64 {
-        format!("~{:.2} MB", size / MEGABYTE as f64)
-    } else if size < TERABYTE as f64 {
-        format!("~{:.2} GB", size / GIGABYTE as f64)
-    } else if size < PETABYTE as f64 {
-        format!("~{:.2} TB", size / TERABYTE as f64)
+pub fn bits(bit_size: f64) -> String {
+    if bit_size < KILOBIT as f64 {
+        format!("~{:.2} b", bit_size)
+    } else if bit_size < MEGABYTE as f64 {
+        format!("~{:.2} KB", bit_size / KILOBIT as f64)
+    } else if bit_size < GIGABYTE as f64 {
+        format!("~{:.2} MB", bit_size / MEGABYTE as f64)
+    } else if bit_size < TERABYTE as f64 {
+        format!("~{:.2} GB", bit_size / GIGABYTE as f64)
+    } else if bit_size < PETABYTE as f64 {
+        format!("~{:.2} TB", bit_size / TERABYTE as f64)
     } else {
-        format!("~{:.2} PB", size / PETABYTE as f64)
+        format!("~{:.2} PB", bit_size / PETABYTE as f64)
     }
 }
 

@@ -18,13 +18,11 @@ use win_desktop_duplication::{devices::*, tex_reader::*};
 use winit::event_loop::EventLoopBuilder;
 
 const CRATE_NAME: &str = env!("CARGO_PKG_NAME");
-const CRATE_DESCRIPTION: &str = env!("CARGO_PKG_DESCRIPTION");
 
-const SAVE_TEXT: &'static str = "Save buffer";
-const TOGGLE_TEXT_PAUSE: &'static str = "Pause buffering";
-const TOGGLE_TEXT_RESUME: &'static str = "Resume buffering";
-const TOGGLE_TEXT_EXIT: &'static str = "Exitting...";
-const QUIT_TEXT: &'static str = "Quit";
+const MENU_ITEM_SAVE_TEXT: &'static str = "Save buffer";
+const MENU_ITEM_TOGGLE_TEXT_PAUSE: &'static str = "Pause buffering";
+const MENU_ITEM_TOGGLE_TEXT_RESUME: &'static str = "Resume buffering";
+const MENU_ITEM_QUIT_TEXT: &'static str = "Quit";
 
 enum ChannelKind {
     Red,
@@ -56,20 +54,53 @@ struct Frame {
 
 impl Frame {
     fn new() -> Self {
-        let data = vec![0; *RECORDING_FRAME_BIT_COUNT];
-        Frame { data }
+        Frame {
+            data: vec![0; *RECORDING_FRAME_BIT_COUNT],
+        }
     }
 }
 
+#[derive(Clone, Copy)]
 enum VideoBufferState {
     Paused,
     Recording,
     Exiting,
 }
 
+struct FpsCounter {
+    frame_count: usize,
+    start_time: Instant,
+    fps: f64,
+}
+
+impl FpsCounter {
+    fn new() -> Self {
+        FpsCounter {
+            frame_count: 0,
+            start_time: Instant::now(),
+            fps: 0.0,
+        }
+    }
+
+    fn update(&mut self) {
+        self.frame_count += 1;
+
+        let elapsed_time = self.start_time.elapsed().as_secs_f64();
+        if elapsed_time >= 1.0 {
+            self.fps = self.frame_count as f64 / elapsed_time;
+            self.frame_count = 0;
+            self.start_time = Instant::now();
+        }
+    }
+
+    fn get_fps(&self) -> f64 {
+        self.fps
+    }
+}
+
 struct VideoBuffer {
     frames: Vec<Frame>,
-    current_index: usize,
+    current_frame_index: usize,
     state: VideoBufferState,
 
     dupl_api: DesktopDuplicationApi,
@@ -83,12 +114,12 @@ struct VideoBuffer {
     save_item: MenuItem,
     toggle_item: MenuItem,
     quit_item: MenuItem,
+
+    fps_counter: FpsCounter,
 }
 
 impl VideoBuffer {
     fn new() -> Self {
-        let state: VideoBufferState = VideoBufferState::Recording;
-
         let icon_off_path = concat!(env!("CARGO_MANIFEST_DIR"), "./assets/off.png");
         let icon_off = load_icon(Path::new(icon_off_path));
 
@@ -98,17 +129,11 @@ impl VideoBuffer {
         let icon_on_path = concat!(env!("CARGO_MANIFEST_DIR"), "./assets/on.png");
         let icon_on = load_icon(Path::new(icon_on_path));
 
-        let save_item: MenuItem = MenuItem::new(SAVE_TEXT, true, None); // TODO
-        let text = match VideoBufferState::Recording {
-            VideoBufferState::Recording => TOGGLE_TEXT_PAUSE,
-            VideoBufferState::Paused => TOGGLE_TEXT_RESUME,
-            VideoBufferState::Exiting => TOGGLE_TEXT_EXIT,
-        };
-        let toggle_item = MenuItem::new(text, true, None);
-        let quit_item = MenuItem::new(QUIT_TEXT, true, None);
+        let save_item: MenuItem = MenuItem::new(MENU_ITEM_SAVE_TEXT, true, None); // TODO
+        let toggle_item = MenuItem::new(MENU_ITEM_TOGGLE_TEXT_PAUSE, true, None);
+        let quit_item = MenuItem::new(MENU_ITEM_QUIT_TEXT, true, None);
 
         let tray_menu = Menu::new();
-
         tray_menu
             .append_items(&[
                 &save_item,
@@ -121,12 +146,10 @@ impl VideoBuffer {
 
         let tray_icon = TrayIconBuilder::new()
             .with_menu(Box::new(tray_menu))
-            .with_tooltip(format!("{} - {}", CRATE_NAME, CRATE_DESCRIPTION))
+            .with_tooltip(CRATE_NAME)
             .with_icon(icon_on.clone())
             .build()
             .expect("Failed to create tray icon");
-
-        // SECTION DISPLAY CAPTURE
 
         set_process_dpi_awareness();
         co_init();
@@ -136,12 +159,13 @@ impl VideoBuffer {
             .expect("Adapter not found");
         let display = adapter.get_display_by_idx(0).expect("Display not found");
         let dupl_api = DesktopDuplicationApi::new(adapter, display).expect("Duplication API error");
+        // TODO : check options for duplication api
         let (device, ctx) = dupl_api.get_device_and_ctx();
 
         Self {
             frames: (0..*BUFFER_FRAME_COUNT).map(|_| Frame::new()).collect(),
-            current_index: 0,
-            state,
+            current_frame_index: 0,
+            state: VideoBufferState::Recording,
 
             dupl_api,
             texture_reader: TextureReader::new(device, ctx),
@@ -154,89 +178,102 @@ impl VideoBuffer {
             save_item,
             toggle_item,
             quit_item,
+
+            fps_counter: FpsCounter::new(),
         }
     }
 
-    fn pause(&mut self) {
-        self.state = VideoBufferState::Paused;
-        self.tray_icon
-            .set_icon(Some(self.icon_off.clone()))
-            .expect("Failed to set icon");
-        self.toggle_item.set_text(TOGGLE_TEXT_RESUME);
+    fn set_state(&mut self, state: VideoBufferState) {
+        self.state = state;
+        match self.state {
+            VideoBufferState::Recording => {
+                self.tray_icon
+                    .set_icon(Some(self.icon_on.clone()))
+                    .expect("Failed to set icon");
+                self.toggle_item.set_text(MENU_ITEM_TOGGLE_TEXT_PAUSE);
+            }
+            VideoBufferState::Paused => {
+                self.tray_icon
+                    .set_icon(Some(self.icon_off.clone()))
+                    .expect("Failed to set icon");
+                self.toggle_item.set_text(MENU_ITEM_TOGGLE_TEXT_RESUME);
+            }
+            VideoBufferState::Exiting => {
+                self.tray_icon.set_show_menu_on_left_click(false);
+                self.tray_icon
+                    .set_visible(false)
+                    .expect("Failed to hide tray icon");
+                std::process::exit(0);
+            }
+        };
     }
 
-    fn resume(&mut self) {
-        self.state = VideoBufferState::Recording;
-        self.tray_icon
-            .set_icon(Some(self.icon_on.clone()))
-            .expect("Failed to set icon");
-        self.toggle_item.set_text(TOGGLE_TEXT_PAUSE);
-    }
-
-    fn exit(&mut self) {
-        self.state = VideoBufferState::Exiting;
-        self.tray_icon.set_show_menu_on_left_click(false);
-        self.tray_icon
-            .set_visible(false)
-            .expect("Failed to hide tray icon");
-        std::process::exit(0);
-    }
-
-    fn tray_event(&mut self, event: MenuEvent) {
-        match event.id {
+    fn tray_event(&mut self, menu_event: MenuEvent) {
+        match menu_event.id {
             id if id == self.toggle_item.id().0 => match self.state {
-                VideoBufferState::Paused => {
-                    self.resume();
-                }
-                VideoBufferState::Recording => {
-                    self.pause();
-                }
+                VideoBufferState::Paused => self.set_state(VideoBufferState::Recording),
+                VideoBufferState::Recording => self.set_state(VideoBufferState::Paused),
                 _ => {}
             },
-            id if id == self.quit_item.id().0 => {
-                self.exit();
-            }
+            id if id == self.quit_item.id().0 => self.set_state(VideoBufferState::Exiting),
+            id if id == self.save_item.id().0 => self.save(),
             _ => (),
         }
     }
 
     fn tick(&mut self) {
+        self.fps_counter.update();
+
         match self.state {
             VideoBufferState::Recording => {
                 let start_time = Instant::now();
 
                 let result = self.dupl_api.acquire_next_frame_now();
                 if let Ok(tex) = result {
-                    let buffer = &mut self.frames[self.current_index].data;
+                    let buffer = &mut self.frames[self.current_frame_index].data;
 
                     self.texture_reader
                         .get_data(buffer, &tex)
                         .expect("Error getting data");
 
-                    let buffer_bit_size = buffer.len() * BYTE as usize;
-
-                    if buffer_bit_size < *RECORDING_FRAME_BIT_COUNT {
-                        buffer.resize(*RECORDING_FRAME_BIT_COUNT, 0);
-                    } else if buffer_bit_size > *RECORDING_FRAME_BIT_COUNT {
-                        buffer.truncate(*RECORDING_FRAME_BIT_COUNT);
-                    }
-
-                    // TODO : double buffer matrix for async / threadding ? maybe
-                    self.current_index = (self.current_index + 1) % *BUFFER_FRAME_COUNT;
+                    // TODO : trim if necessary
+                    // let buffer_bit_size = buffer.len() * BYTE as usize;
+                    // if buffer_bit_size < *RECORDING_FRAME_BIT_COUNT {
+                    //     println!(
+                    //         "resized buffer from {} to {}",
+                    //         buffer_bit_size, *RECORDING_FRAME_BIT_COUNT
+                    //     );
+                    //     buffer.resize(*RECORDING_FRAME_BIT_COUNT, 0);
+                    // } else if buffer_bit_size > *RECORDING_FRAME_BIT_COUNT {
+                    //     println!(
+                    //         "truncated buffer from {} to {}",
+                    //         buffer_bit_size, *RECORDING_FRAME_BIT_COUNT
+                    //     );
+                    //     buffer.truncate(*RECORDING_FRAME_BIT_COUNT);
+                    // }
 
                     println!(
-                        "Buffered frame {}/{} in {}",
-                        self.current_index,
+                        "Buffered frame {}/{} in {:.2}ms, FPS: {:.2}",
+                        self.current_frame_index,
                         *BUFFER_FRAME_COUNT,
-                        format::duration(start_time.elapsed()),
+                        start_time.elapsed().as_millis(),
+                        self.fps_counter.get_fps(),
                     );
+
+                    self.current_frame_index = (self.current_frame_index + 1) % *BUFFER_FRAME_COUNT;
                 }
             }
             _ => {}
         }
     }
 
-    fn save_buffer(&self) {
+    fn save(&mut self) {
+        let saved_state = self.state.clone();
+        self.set_state(VideoBufferState::Paused);
+        self.tray_icon
+            .set_icon(Some(self.icon_saving.clone()))
+            .expect("Failed to set icon");
+
         println!("Captured {} frames", *BUFFER_FRAME_COUNT);
 
         let timestamp = chrono::Utc::now().timestamp();
@@ -258,8 +295,10 @@ impl VideoBuffer {
         };
         println!("Raw file opened");
 
-        // FIX loop from current_index to end then from 0 to current_index - 1
-        for frame in &self.frames {
+        let starting_index = self.current_frame_index % self.frames.len();
+        for i in 0..self.frames.len() {
+            let index = (starting_index + i) % self.frames.len();
+            let frame = &self.frames[index];
             raw.write_all(&frame.data).expect("Unable to write to file");
         }
         println!("Raw file written");
@@ -271,9 +310,9 @@ impl VideoBuffer {
         let file_bit_size =
             raw.metadata().expect("Unable to get file metadata").len() * BYTE as u64;
         println!("Raw file size: {}", file_bit_size);
-        let expected = *BUFFER_FRAME_COUNT as u64 * *BUFFER_FRAME_BIT_COUNT as u64; // TODO : replace RECORDING_FRAME_BIT_COUNT by RECORDING_FRAME_BYTE_COUNT
-        println!("Expected file size: {}", expected);
-        assert_eq!(file_bit_size, expected);
+        let expected_bit_size = *BUFFER_FRAME_COUNT as u64 * *BUFFER_FRAME_BIT_COUNT as u64; // TODO : replace RECORDING_FRAME_BIT_COUNT by RECORDING_FRAME_BYTE_COUNT
+        println!("Expected file size: {}", expected_bit_size);
+        assert_eq!(file_bit_size, expected_bit_size);
         println!("File passed size check");
 
         let output = std::process::Command::new("ffmpeg")
@@ -305,16 +344,21 @@ impl VideoBuffer {
             }
             Err(e) => println!("error: {}", e),
         }
+
+        self.set_state(saved_state);
     }
 }
 
-const HOTKEY_MODIFIER: Option<Modifiers> = Some(Modifiers::SHIFT);
-const HOTKEY_KEY: Code = Code::KeyX;
-const PREFERRED_MAX_RAM_USAGE_BIT: usize = 2 * format::GIGABYTE as usize;
-const BUFFER_AMNESIA: Duration = Duration::from_secs(3);
+const HOTKEY_MODIFIER_OPTION: Option<Modifiers> = None; // Some(Modifiers::SHIFT)
+const HOTKEY_KEY: Code = Code::PageDown;
+
+const PREFERRED_MAX_RAM_USAGE_BIT: usize = 30 * format::GIGABYTE as usize;
+const BUFFER_AMNESIA: Duration = Duration::from_secs(15);
 const PATH_STR: &str = "C:\\Users\\DREAD\\Desktop\\_\\recordings\\";
 
 lazy_static::lazy_static! {
+    static ref HOTKEY: HotKey = HotKey::new(HOTKEY_MODIFIER_OPTION, HOTKEY_KEY);
+
     static ref RECORDING_FOLDER: &'static Path = Path::new(PATH_STR);
     static ref RECORDING_FORMAT: VideoFormat = VideoFormat {
         resolution: Resolution {
@@ -378,6 +422,7 @@ lazy_static::lazy_static! {
     } else {
        PREFERRED_MAX_RAM_USAGE_BIT as usize / *BUFFER_FRAME_BIT_COUNT
     };
+    static ref BUFFER_TOTAL_RAM_USAGE: usize = *BUFFER_FRAME_COUNT * *BUFFER_FRAME_BIT_COUNT;
 }
 
 fn load_icon(path: &Path) -> tray_icon::Icon {
@@ -394,55 +439,46 @@ fn load_icon(path: &Path) -> tray_icon::Icon {
 
 #[tokio::main]
 pub async fn main() {
+    println!(
+        "Max memory usage: {}",
+        format::bits(*BUFFER_TOTAL_RAM_USAGE as f64)
+    );
+
     let manager = GlobalHotKeyManager::new().expect("Failed to create manager");
-    let hotkey = HotKey::new(HOTKEY_MODIFIER, HOTKEY_KEY);
-    manager.register(hotkey).expect("Failed to register hotkey");
+    manager
+        .register(*HOTKEY)
+        .expect("Failed to register hotkey");
 
     let event_loop = EventLoopBuilder::new()
         .build()
         .expect("Failed to build event loop");
 
-    event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
-
+    let hotkey_channel = GlobalHotKeyEvent::receiver();
     let menu_channel = MenuEvent::receiver();
     let mut video_buffer = VideoBuffer::new();
 
     event_loop
         .run(
-            move |event, elwt: &winit::event_loop::EventLoopWindowTarget<()>| {
-                if let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
-                    println!("{:?}", event);
-                    video_buffer.save_buffer();
-                }
-
-                match menu_channel.try_recv() {
-                    Ok(menu_event) => video_buffer.tray_event(menu_event),
-                    _ => {}
-                }
-
-                match event {
-                    winit::event::Event::LoopExiting => {
-                        video_buffer.exit();
-                        return;
+            move |_event, elwt: &winit::event_loop::EventLoopWindowTarget<()>| {
+                if let Ok(hotkey_event) = hotkey_channel.try_recv() {
+                    match hotkey_event.state {
+                        global_hotkey::HotKeyState::Pressed => video_buffer.save(),
+                        global_hotkey::HotKeyState::Released => {}
                     }
-
-                    winit::event::Event::NewEvents(
-                        winit::event::StartCause::ResumeTimeReached {
-                            start: _,            // TODO
-                            requested_resume: _, // TODO
-                        },
-                    ) => {
-                        video_buffer.tick();
-                    }
-                    _ => {}
                 }
 
-                elwt.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
-                    Instant::now()
-                        + Duration::from_secs_f64(
-                            1.0 / RECORDING_FORMAT.framerate_per_second as f64,
-                        ),
-                ));
+                if let Ok(menu_event) = menu_channel.try_recv() {
+                    video_buffer.tray_event(menu_event);
+                }
+
+                video_buffer.tick();
+
+                let resume_instant = Instant::now()
+                    + Duration::from_millis(1000 / RECORDING_FORMAT.framerate_per_second as u64); // TODO  negate the time it took to process the frame to get a steady framerate, a better solution would be to use an async thread
+
+                // let resume_instant = Instant::now();
+
+                elwt.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(resume_instant));
             },
         )
         .expect("Event loop failed");
