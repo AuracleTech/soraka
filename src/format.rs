@@ -38,8 +38,17 @@ pub fn duration(duration: Duration) -> String {
     let hours = minutes / 60;
     let days = hours / 24;
     let years = days / 365;
+    let decades = years / 10;
+    let centuries = decades / 10;
+    let millennia = centuries / 10;
 
-    if years > 0 {
+    if millennia > 0 {
+        format!("~{} millennia", millennia)
+    } else if centuries > 0 {
+        format!("~{} century(s)", centuries)
+    } else if decades > 0 {
+        format!("~{} decade(s)", decades)
+    } else if years > 0 {
         format!("~{} year(s)", years)
     } else if days > 0 {
         format!("~{} day(s)", days)
