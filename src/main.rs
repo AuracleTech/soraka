@@ -2,19 +2,21 @@
 mod format;
 
 use format::BYTE;
-use global_hotkey::GlobalHotKeyEvent;
 use global_hotkey::{
     hotkey::{Code, HotKey, Modifiers},
-    GlobalHotKeyManager,
+    GlobalHotKeyEvent, GlobalHotKeyManager,
 };
-use std::fs::OpenOptions;
-use std::io::Write;
-use std::path::Path;
-use std::time::{Duration, Instant};
-use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
-use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
-use win_desktop_duplication::*;
-use win_desktop_duplication::{devices::*, tex_reader::*};
+use std::{
+    fs::OpenOptions,
+    io::Write,
+    path::Path,
+    time::{Duration, Instant},
+};
+use tray_icon::{
+    menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
+    Icon, TrayIcon, TrayIconBuilder,
+};
+use win_desktop_duplication::{devices::*, tex_reader::*, *};
 use winit::event_loop::EventLoopBuilder;
 
 const CRATE_NAME: &str = env!("CARGO_PKG_NAME");
@@ -55,7 +57,7 @@ struct Frame {
 impl Frame {
     fn new() -> Self {
         Frame {
-            data: vec![0; *RECORDING_FRAME_BIT_COUNT],
+            data: vec![0; *BUFFER_FRAME_BIT_COUNT],
         }
     }
 }
@@ -281,11 +283,8 @@ impl VideoBuffer {
         let raw_full_path = RECORDING_FOLDER.join(raw_file_name);
         println!("Raw file path: {}", raw_full_path.display());
 
-        let crafted_file_name = format!("crafted{}.mp4", timestamp);
-        let crafted_full_path = RECORDING_FOLDER.join(crafted_file_name);
-        println!("Crafted file path: {}", crafted_full_path.display());
-
-        let mut raw = match OpenOptions::new()
+        let start_time = Instant::now();
+        let mut raw_file = match OpenOptions::new()
             .create(true)
             .append(true)
             .open(&raw_full_path)
@@ -294,26 +293,42 @@ impl VideoBuffer {
             Err(e) => panic!("Error creating file: {}", e),
         };
         println!("Raw file opened");
+        println!(
+            "Raw file opened in {}",
+            format::duration(start_time.elapsed())
+        );
 
+        let start_time = Instant::now();
         let starting_index = self.current_frame_index % self.frames.len();
         for i in 0..self.frames.len() {
             let index = (starting_index + i) % self.frames.len();
             let frame = &self.frames[index];
-            raw.write_all(&frame.data).expect("Unable to write to file");
+            raw_file
+                .write_all(&frame.data)
+                .expect("Unable to write to file");
         }
         println!("Raw file written");
-
-        raw.flush().expect("Unable to flush file");
-        raw.sync_all().expect("Unable to sync file");
+        raw_file.flush().expect("Unable to flush file");
         println!("Raw file flushed");
+        println!(
+            "Raw file saved in {}",
+            format::duration(start_time.elapsed())
+        );
 
-        let file_bit_size =
-            raw.metadata().expect("Unable to get file metadata").len() * BYTE as u64;
+        let file_bit_size = raw_file
+            .metadata()
+            .expect("Unable to get file metadata")
+            .len()
+            * BYTE as u64;
         println!("Raw file size: {}", file_bit_size);
         let expected_bit_size = *BUFFER_FRAME_COUNT as u64 * *BUFFER_FRAME_BIT_COUNT as u64; // TODO : replace RECORDING_FRAME_BIT_COUNT by RECORDING_FRAME_BYTE_COUNT
         println!("Expected file size: {}", expected_bit_size);
         assert_eq!(file_bit_size, expected_bit_size);
         println!("File passed size check");
+
+        let crafted_file_name = format!("crafted{}.mp4", timestamp);
+        let crafted_full_path = RECORDING_FOLDER.join(crafted_file_name);
+        println!("Crafted file path: {}", crafted_full_path.display());
 
         let output = std::process::Command::new("ffmpeg")
             .arg("-f")
@@ -352,14 +367,14 @@ impl VideoBuffer {
 const HOTKEY_MODIFIER_OPTION: Option<Modifiers> = None; // Some(Modifiers::SHIFT)
 const HOTKEY_KEY: Code = Code::PageDown;
 
-const PREFERRED_MAX_RAM_USAGE_BIT: usize = 30 * format::GIGABYTE as usize;
-const BUFFER_AMNESIA: Duration = Duration::from_secs(15);
-const PATH_STR: &str = "C:\\Users\\DREAD\\Desktop\\_\\recordings\\";
+const PREFERRED_MAX_RAM_USAGE_BIT: usize = 5 * format::GIGABYTE as usize;
+const BUFFER_AMNESIA: Duration = Duration::from_secs(4);
+const RECORDING_FOLDER_STR: &str = "C:\\Users\\DREAD\\Desktop\\_\\recordings\\";
 
 lazy_static::lazy_static! {
     static ref HOTKEY: HotKey = HotKey::new(HOTKEY_MODIFIER_OPTION, HOTKEY_KEY);
 
-    static ref RECORDING_FOLDER: &'static Path = Path::new(PATH_STR);
+    static ref RECORDING_FOLDER: &'static Path = Path::new(RECORDING_FOLDER_STR);
     static ref RECORDING_FORMAT: VideoFormat = VideoFormat {
         resolution: Resolution {
             width: 2560,
